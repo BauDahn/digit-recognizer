@@ -1,16 +1,20 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { NeuralNetwork } from '../../ml/neuralNetwork';
 import { createSyntheticDataset, generateSyntheticDigit } from '../../ml/syntheticDataset';
+import { getRealMnistSplits, MnistSampleInfo } from '../../ml/mnistLoader';
 import { preprocessCanvasTo28x28 } from '../../ml/preprocessing';
 import { PredictionResult, TrainingEpochMetric, TrainingSample } from '../../types';
 import { ConfusionMatrix } from './ConfusionMatrix';
 import { WeightVisualizer } from './WeightVisualizer';
-import { Play, Pause, RotateCcw, Plus, Trash2, Sliders, CheckCircle2, AlertCircle } from 'lucide-react';
+import { MnistGallery } from './MnistGallery';
+import { Play, Pause, RotateCcw, Plus, Trash2, Database, Sparkles, CheckCircle2 } from 'lucide-react';
 
 interface DigitLabProps {
   network: NeuralNetwork;
   onNetworkUpdate: () => void;
 }
+
+type DatasetSource = 'real-mnist' | 'synthetic';
 
 export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) => {
   // Drawing Canvas
@@ -29,7 +33,8 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
   const [learningRate, setLearningRate] = useState<number>(0.05);
   const [batchSize, setBatchSize] = useState<number>(16);
 
-  // Datasets
+  // Dataset selection: 'real-mnist' vs 'synthetic'
+  const [datasetSource, setDatasetSource] = useState<DatasetSource>('real-mnist');
   const [dataset, setDataset] = useState<TrainingSample[]>([]);
   const [testDataset, setTestDataset] = useState<TrainingSample[]>([]);
   const [confusionMatrix, setConfusionMatrix] = useState<number[][]>(() =>
@@ -40,17 +45,27 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
   const [customLabel, setCustomLabel] = useState<number>(0);
   const [addedToast, setAddedToast] = useState<string | null>(null);
 
-  // Initialize dataset on mount
-  useEffect(() => {
-    const trainData = createSyntheticDataset(25); // 250 samples
-    const testData = createSyntheticDataset(10); // 100 test samples
-    setDataset(trainData);
-    setTestDataset(testData);
-
-    // Initial evaluation
-    const initialEval = network.evaluate(testData);
-    setConfusionMatrix(initialEval.confusionMatrix);
+  // Load dataset based on selected source
+  const loadDataset = useCallback((source: DatasetSource) => {
+    if (source === 'real-mnist') {
+      const { trainSet, testSet } = getRealMnistSplits(0.8);
+      setDataset(trainSet);
+      setTestDataset(testSet);
+      const evalRes = network.evaluate(testSet);
+      setConfusionMatrix(evalRes.confusionMatrix);
+    } else {
+      const trainData = createSyntheticDataset(30);
+      const testData = createSyntheticDataset(10);
+      setDataset(trainData);
+      setTestDataset(testData);
+      const evalRes = network.evaluate(testData);
+      setConfusionMatrix(evalRes.confusionMatrix);
+    }
   }, [network]);
+
+  useEffect(() => {
+    loadDataset(datasetSource);
+  }, [datasetSource, loadDataset]);
 
   // Setup drawing canvas
   useEffect(() => {
@@ -182,6 +197,41 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
 
     setDataset((prev) => [newSample, ...prev]);
     setAddedToast(`Added handwritten sample as digit "${customLabel}"!`);
+    setTimeout(() => setAddedToast(null), 2500);
+  };
+
+  // Load authentic MNIST sample onto canvas
+  const handleSelectMnistSample = (sample: MnistSampleInfo) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Render 28x28 sample scaled up to 280x280
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = 28;
+    tempCanvas.height = 28;
+    const tctx = tempCanvas.getContext('2d')!;
+    const tImg = tctx.createImageData(28, 28);
+
+    for (let i = 0; i < 784; i++) {
+      // High activation is black ink
+      const v = Math.round(255 * (1 - sample.pixels[i]));
+      tImg.data[i * 4] = v;
+      tImg.data[i * 4 + 1] = v;
+      tImg.data[i * 4 + 2] = v;
+      tImg.data[i * 4 + 3] = 255;
+    }
+    tctx.putImageData(tImg, 0, 0);
+
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(tempCanvas, 0, 0, canvas.width, canvas.height);
+
+    classifyCurrentCanvas();
+    setAddedToast(`Loaded authentic MNIST sample (Ground Truth: ${sample.label})`);
     setTimeout(() => setAddedToast(null), 2500);
   };
 
@@ -487,6 +537,37 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
 
             {/* Hyperparameters */}
             <div className="space-y-3 mb-4 text-xs">
+              {/* Dataset Source Selector */}
+              <div>
+                <span className="text-slate-600 block mb-1 font-medium">Training Dataset Source:</span>
+                <div className="grid grid-cols-2 gap-1 p-0.5 bg-slate-100 rounded-lg">
+                  <button
+                    onClick={() => setDatasetSource('real-mnist')}
+                    disabled={isTraining}
+                    className={`py-1.5 px-2 text-xs font-medium rounded-md transition-colors flex items-center justify-center gap-1.5 ${
+                      datasetSource === 'real-mnist'
+                        ? 'bg-white text-indigo-700 shadow-2xs font-semibold'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <Database className="w-3 h-3 text-indigo-500" />
+                    <span>Real MNIST</span>
+                  </button>
+                  <button
+                    onClick={() => setDatasetSource('synthetic')}
+                    disabled={isTraining}
+                    className={`py-1.5 px-2 text-xs font-medium rounded-md transition-colors flex items-center justify-center gap-1.5 ${
+                      datasetSource === 'synthetic'
+                        ? 'bg-white text-slate-900 shadow-2xs font-semibold'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <Sparkles className="w-3 h-3 text-amber-500" />
+                    <span>Synthetic</span>
+                  </button>
+                </div>
+              </div>
+
               <div>
                 <div className="flex justify-between text-slate-600 mb-1">
                   <span>Epochs</span>
@@ -623,6 +704,9 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
           </div>
         </div>
       </div>
+
+      {/* Real MNIST Dataset Visual Browser & Explorer */}
+      <MnistGallery onSelectSample={handleSelectMnistSample} />
 
       {/* Lower Row: Confusion Matrix + Neural Feature Weight Visualizer */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
