@@ -23,10 +23,10 @@ export interface TrainingSample {
 }
 
 export interface NetworkConfig {
-  inputSize: number; // 784
+  inputSize: number; // 784 (28x28)
   hiddenSize1: number; // 32, 64, or 128
   hiddenSize2: number; // 16, 32
-  outputSize: number; // 10
+  outputSize: number; // number of classes: 10 digits, 47 EMNIST, ...
   learningRate: number; // e.g. 0.05
   momentum: number; // e.g. 0.9
   batchSize: number; // e.g. 16
@@ -35,8 +35,10 @@ export interface NetworkConfig {
 
 export interface TrainingEpochMetric {
   epoch: number;
-  loss: number;
-  accuracy: number;
+  loss: number; // training loss
+  accuracy: number; // test (validation) accuracy
+  trainAccuracy?: number;
+  seconds?: number;
 }
 
 export interface PredictionResult {
@@ -64,8 +66,11 @@ export interface SegmentedCharacter {
   box: { x: number; y: number; width: number; height: number };
   pixels: Float32Array; // 28x28 normalized
   features: AlphanumericFeatureBreakdown;
-  predictedChar: string;
+  predictedChar: string; // heuristic (feature rules) prediction
   candidates: Array<{ char: string; confidence: number }>;
+  nnPixels?: Float32Array; // MNIST-style 28x28 input fed to the network
+  nnChar?: string; // neural network prediction
+  nnCandidates?: Array<{ char: string; confidence: number }>;
 }
 
 export interface MathRecognitionResult {
@@ -77,8 +82,16 @@ export interface MathRecognitionResult {
   autoAnswer?: string;
   steps?: string[];
   isGraphable?: boolean;
-  graphJsExpr?: string;
+  graphExpr?: string; // expression in x, parsed by src/ml/mathParser (never evaluated as JS)
   graphTitle?: string;
+  error?: string;
+  symbols?: Array<{
+    char: string;
+    confidence: number;
+    candidates: Array<{ char: string; confidence: number }>;
+    pixels: Float32Array | null;
+    isSuperscript: boolean;
+  }>;
   rawBoundingBox?: { x: number; y: number; width: number; height: number };
 }
 
@@ -94,5 +107,5 @@ export interface MathCanvasCard {
   solution?: string;
   autoAnswer?: string;
   steps?: string[];
-  graphJsExpr?: string;
+  graphExpr?: string;
 }

@@ -1,18 +1,11 @@
-import rawMnistData from '../data/mnist_subset.json';
 import { TrainingSample } from '../types';
+import { datasetUrl, fetchDataset, imageAt, RawDataset, toTrainingSamples } from './datasets';
 
 /**
- * Decodes base64 string into Float32Array of 784 normalized [0, 1] pixels
+ * Real MNIST, served from public/datasets (built by `npm run build:datasets`):
+ * 8,000 training images (800 per digit) and 2,000 test images (200 per digit),
+ * taken from the official MNIST train and test splits.
  */
-function decodeBase64ToFloat32Array(b64: string): Float32Array {
-  const binaryString = atob(b64);
-  const len = binaryString.length;
-  const pixels = new Float32Array(len);
-  for (let i = 0; i < len; i++) {
-    pixels[i] = binaryString.charCodeAt(i) / 255.0;
-  }
-  return pixels;
-}
 
 export interface MnistSampleInfo {
   id: string;
@@ -20,64 +13,39 @@ export interface MnistSampleInfo {
   pixels: Float32Array;
 }
 
-let cachedMnistSamples: MnistSampleInfo[] | null = null;
+let trainPromise: Promise<RawDataset> | null = null;
+let testPromise: Promise<RawDataset> | null = null;
 
-export function loadRealMnistSamples(): MnistSampleInfo[] {
-  if (cachedMnistSamples) return cachedMnistSamples;
-
-  cachedMnistSamples = (rawMnistData as Array<{ id: string; label: number; b64: string }>).map(
-    (item) => ({
-      id: item.id,
-      label: item.label,
-      pixels: decodeBase64ToFloat32Array(item.b64),
-    })
-  );
-
-  return cachedMnistSamples;
+function loadRaw(split: 'train' | 'test'): Promise<RawDataset> {
+  if (split === 'train') {
+    trainPromise ??= fetchDataset(datasetUrl('mnist-train')).catch((e) => {
+      trainPromise = null;
+      throw e;
+    });
+    return trainPromise;
+  }
+  testPromise ??= fetchDataset(datasetUrl('mnist-test')).catch((e) => {
+    testPromise = null;
+    throw e;
+  });
+  return testPromise;
 }
 
-/**
- * Partition real MNIST into training set and test set
- */
-export function getRealMnistSplits(trainRatio = 0.8): {
-  trainSet: TrainingSample[];
-  testSet: TrainingSample[];
-} {
-  const allSamples = loadRealMnistSamples();
+export async function getRealMnistSplits(): Promise<{ trainSet: TrainingSample[]; testSet: TrainingSample[] }> {
+  const [train, test] = await Promise.all([loadRaw('train'), loadRaw('test')]);
+  return { trainSet: toTrainingSamples(train, 'mnist-train'), testSet: toTrainingSamples(test, 'mnist-test') };
+}
 
-  // Group by digit to ensure balanced stratification
-  const byDigit: Record<number, MnistSampleInfo[]> = {};
-  for (let d = 0; d < 10; d++) byDigit[d] = [];
-  for (const s of allSamples) {
-    byDigit[s.label].push(s);
+/** A few samples of each digit from the test split, for the gallery. */
+export async function loadMnistGallerySamples(perDigit = 30): Promise<MnistSampleInfo[]> {
+  const test = await loadRaw('test');
+  const counts = new Array(10).fill(0);
+  const out: MnistSampleInfo[] = [];
+  for (let i = 0; i < test.count; i++) {
+    const label = test.labels[i];
+    if (counts[label] >= perDigit) continue;
+    counts[label]++;
+    out.push({ id: `mnist-test-${i}`, label, pixels: imageAt(test, i) });
   }
-
-  const trainSet: TrainingSample[] = [];
-  const testSet: TrainingSample[] = [];
-
-  for (let d = 0; d < 10; d++) {
-    const list = byDigit[d];
-    const splitIndex = Math.floor(list.length * trainRatio);
-    for (let i = 0; i < list.length; i++) {
-      const item = list[i];
-      const sample: TrainingSample = {
-        id: item.id,
-        label: item.label,
-        pixels: item.pixels,
-      };
-      if (i < splitIndex) {
-        trainSet.push(sample);
-      } else {
-        testSet.push(sample);
-      }
-    }
-  }
-
-  // Shuffle train set
-  for (let i = trainSet.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [trainSet[i], trainSet[j]] = [trainSet[j], trainSet[i]];
-  }
-
-  return { trainSet, testSet };
+  return out;
 }

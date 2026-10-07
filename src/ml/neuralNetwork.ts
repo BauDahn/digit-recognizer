@@ -1,16 +1,16 @@
-import { NetworkConfig, PredictionResult, TrainingEpochMetric, TrainingSample } from '../types';
+import { NetworkConfig, PredictionResult, TrainingSample } from '../types';
 
 export class NeuralNetwork {
   config: NetworkConfig;
 
   // Layer dimensions
-  // 784 -> h1 -> h2 -> 10
-  w1: Float32Array; // [h1 x 784]
+  // inputSize -> h1 -> h2 -> outputSize (784 -> 64 -> 32 -> 10 for MNIST digits)
+  w1: Float32Array; // [h1 x inputSize]
   b1: Float32Array; // [h1]
   w2: Float32Array; // [h2 x h1]
   b2: Float32Array; // [h2]
-  w3: Float32Array; // [10 x h2]
-  b3: Float32Array; // [10]
+  w3: Float32Array; // [outputSize x h2]
+  b3: Float32Array; // [outputSize]
 
   // Momentum velocity buffers
   vw1: Float32Array;
@@ -24,10 +24,10 @@ export class NeuralNetwork {
 
   constructor(config?: Partial<NetworkConfig>) {
     this.config = {
-      inputSize: 784,
+      inputSize: config?.inputSize ?? 784,
       hiddenSize1: config?.hiddenSize1 ?? 64,
       hiddenSize2: config?.hiddenSize2 ?? 32,
-      outputSize: 10,
+      outputSize: config?.outputSize ?? 10,
       learningRate: config?.learningRate ?? 0.04,
       momentum: config?.momentum ?? 0.85,
       batchSize: config?.batchSize ?? 16,
@@ -241,7 +241,7 @@ export class NeuralNetwork {
         // Prediction accuracy
         let predDigit = 0;
         let highestProb = -1;
-        for (let i = 0; i < 10; i++) {
+        for (let i = 0; i < outputSize; i++) {
           if (probabilities[i] > highestProb) {
             highestProb = probabilities[i];
             predDigit = i;
@@ -348,9 +348,10 @@ export class NeuralNetwork {
   evaluate(testSet: TrainingSample[]): {
     accuracy: number;
     loss: number;
-    confusionMatrix: number[][]; // 10 x 10
+    confusionMatrix: number[][]; // outputSize x outputSize, [actual][predicted]
   } {
-    const cm: number[][] = Array.from({ length: 10 }, () => Array(10).fill(0));
+    const n = this.config.outputSize;
+    const cm: number[][] = Array.from({ length: n }, () => Array(n).fill(0));
     let correct = 0;
     let totalLoss = 0;
 
@@ -358,7 +359,7 @@ export class NeuralNetwork {
       const { probabilities } = this.forward(sample.pixels);
       let pred = 0;
       let maxP = -1;
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < n; i++) {
         if (probabilities[i] > maxP) {
           maxP = probabilities[i];
           pred = i;
@@ -378,34 +379,98 @@ export class NeuralNetwork {
   }
 
   /**
-   * Export weights for state preservation
+   * Serialize config + weights. Weights are stored as base64-encoded Float32 buffers,
+   * which is ~4x smaller than a JSON array of numbers.
    */
+  serialize(): SerializedNetwork {
+    return {
+      format: NETWORK_FORMAT_VERSION,
+      config: { ...this.config },
+      weights: {
+        w1: floatsToBase64(this.w1),
+        b1: floatsToBase64(this.b1),
+        w2: floatsToBase64(this.w2),
+        b2: floatsToBase64(this.b2),
+        w3: floatsToBase64(this.w3),
+        b3: floatsToBase64(this.b3),
+      },
+    };
+  }
+
+  static deserialize(data: SerializedNetwork): NeuralNetwork {
+    if (data.format !== NETWORK_FORMAT_VERSION) {
+      throw new Error(`Unsupported network format: ${data.format}`);
+    }
+    const net = new NeuralNetwork(data.config);
+    const layers = ['w1', 'b1', 'w2', 'b2', 'w3', 'b3'] as const;
+    for (const name of layers) {
+      const values = base64ToFloats(data.weights[name]);
+      if (values.length !== net[name].length) {
+        throw new Error(`Layer ${name} has ${values.length} values, expected ${net[name].length}`);
+      }
+      net[name].set(values);
+    }
+    net.isTrained = true;
+    return net;
+  }
+
   exportWeights(): string {
-    return JSON.stringify({
-      w1: Array.from(this.w1),
-      b1: Array.from(this.b1),
-      w2: Array.from(this.w2),
-      b2: Array.from(this.b2),
-      w3: Array.from(this.w3),
-      b3: Array.from(this.b3),
-    });
+    return JSON.stringify(this.serialize());
   }
 
   /**
-   * Import weights
+   * Replace this network's weights with the ones in jsonStr.
+   * Throws if the architecture does not match.
    */
   importWeights(jsonStr: string) {
-    try {
-      const data = JSON.parse(jsonStr);
-      this.w1.set(data.w1);
-      this.b1.set(data.b1);
-      this.w2.set(data.w2);
-      this.b2.set(data.b2);
-      this.w3.set(data.w3);
-      this.b3.set(data.b3);
-      this.isTrained = true;
-    } catch (e) {
-      console.error('Failed to import weights', e);
+    const other = NeuralNetwork.deserialize(JSON.parse(jsonStr));
+    const { inputSize, hiddenSize1, hiddenSize2, outputSize } = this.config;
+    const c = other.config;
+    if (
+      c.inputSize !== inputSize ||
+      c.hiddenSize1 !== hiddenSize1 ||
+      c.hiddenSize2 !== hiddenSize2 ||
+      c.outputSize !== outputSize
+    ) {
+      throw new Error(
+        `Architecture mismatch: file is ${c.inputSize}-${c.hiddenSize1}-${c.hiddenSize2}-${c.outputSize}, ` +
+          `network is ${inputSize}-${hiddenSize1}-${hiddenSize2}-${outputSize}`
+      );
     }
+    this.copyWeightsFrom(other);
   }
+
+  copyWeightsFrom(other: NeuralNetwork) {
+    this.w1.set(other.w1);
+    this.b1.set(other.b1);
+    this.w2.set(other.w2);
+    this.b2.set(other.b2);
+    this.w3.set(other.w3);
+    this.b3.set(other.b3);
+    this.isTrained = other.isTrained;
+  }
+}
+
+export const NETWORK_FORMAT_VERSION = 1;
+
+export interface SerializedNetwork {
+  format: number;
+  config: NetworkConfig;
+  weights: Record<'w1' | 'b1' | 'w2' | 'b2' | 'w3' | 'b3', string>;
+}
+
+function floatsToBase64(values: Float32Array): string {
+  const bytes = new Uint8Array(values.buffer, values.byteOffset, values.byteLength);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function base64ToFloats(b64: string): Float32Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Float32Array(bytes.buffer);
 }
