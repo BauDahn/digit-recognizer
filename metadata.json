@@ -1,6 +1,0 @@
-{
-  "name": "NeuroScribe: Math & Character Recognition Studio",
-  "description": "Interactive neural network trainer for digit and alphanumeric recognition with an infinite OneNote-style canvas for handwritten math, symbols, and equations.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
