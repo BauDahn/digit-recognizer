@@ -19,7 +19,6 @@ export const MathResultModal: React.FC<MathResultModalProps> = ({
   onInsertLatexCard,
 }) => {
   const katexFormulaRef = useRef<HTMLDivElement | null>(null);
-  const katexSolutionRef = useRef<HTMLDivElement | null>(null);
   const [copied, setCopied] = React.useState(false);
 
   // Render KaTeX formula whenever result changes
@@ -34,17 +33,6 @@ export const MathResultModal: React.FC<MathResultModalProps> = ({
         });
       } catch (e) {
         katexFormulaRef.current.innerText = result.latex;
-      }
-    }
-
-    if (katexSolutionRef.current && result.solution) {
-      try {
-        katex.render(result.solution, katexSolutionRef.current, {
-          displayMode: false,
-          throwOnError: false,
-        });
-      } catch (e) {
-        katexSolutionRef.current.innerText = result.solution;
       }
     }
   }, [result]);
@@ -90,13 +78,43 @@ export const MathResultModal: React.FC<MathResultModalProps> = ({
             <div className="py-12 flex flex-col items-center justify-center space-y-3">
               <div className="w-8 h-8 border-2 border-slate-900 border-t-transparent rounded-full animate-spin"></div>
               <p className="text-xs text-slate-500 font-medium">
-                Analyzing handwritten strokes & symbols with Gemini Vision...
+                Classifying each symbol with the local neural network...
               </p>
             </div>
           ) : result ? (
             <>
+              {/* What the network saw: one 28x28 image per symbol with its top guesses */}
+              {result.symbols && result.symbols.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">
+                    What the network saw
+                  </h4>
+                  <div className="flex flex-wrap gap-2">
+                    {result.symbols.map((sym, i) => (
+                      <SymbolTile key={i} symbol={sym} />
+                    ))}
+                  </div>
+                  <p className="mt-2 text-[11px] text-slate-400">
+                    Each symbol is cut out, scaled to 28×28 pixels like an MNIST image and classified on its own.
+                    Small dots are detected by their size; raised symbols become exponents.
+                  </p>
+                </div>
+              )}
+
+              {result.error && (
+                <div className="p-3 bg-amber-50 rounded-lg border border-amber-200 text-xs text-amber-900">
+                  {result.error}
+                  {result.symbols && result.symbols.length > 0 && (
+                    <span className="block mt-1 text-amber-700">
+                      Check the symbols above: a wrongly recognized one usually explains the problem. Try writing it
+                      more clearly or select a part of the canvas with the lasso.
+                    </span>
+                  )}
+                </div>
+              )}
+
               {/* LaTeX Formula View */}
-              <div className="p-5 bg-slate-50 rounded-xl border border-slate-200 text-center">
+              {result.latex && <div className="p-5 bg-slate-50 rounded-xl border border-slate-200 text-center">
                 <div className="text-[11px] text-slate-400 uppercase tracking-wider font-semibold mb-2">
                   Recognized LaTeX Formula
                 </div>
@@ -107,7 +125,7 @@ export const MathResultModal: React.FC<MathResultModalProps> = ({
                 <div className="mt-2 text-xs font-mono text-slate-500 bg-white/80 py-1 px-2 rounded border border-slate-200 inline-block max-w-full truncate">
                   {result.latex}
                 </div>
-              </div>
+              </div>}
 
               {/* Solved Result Card */}
               {result.solution && (
@@ -117,7 +135,7 @@ export const MathResultModal: React.FC<MathResultModalProps> = ({
                     <span>Evaluated Solution:</span>
                   </div>
                   <div className="text-base font-semibold text-emerald-950 font-serif">
-                    <span ref={katexSolutionRef}>{result.solution}</span>
+                    <span>{result.solution}</span>
                   </div>
                 </div>
               )}
@@ -209,6 +227,52 @@ export const MathResultModal: React.FC<MathResultModalProps> = ({
           </div>
         </div>
       </div>
+    </div>
+  );
+};
+
+type RecognizedSymbolView = NonNullable<MathRecognitionResult['symbols']>[number];
+
+const SymbolTile: React.FC<{ symbol: RecognizedSymbolView }> = ({ symbol }) => {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const ctx = canvasRef.current?.getContext('2d');
+    if (!ctx || !symbol.pixels) return;
+    const img = ctx.createImageData(28, 28);
+    for (let i = 0; i < 784; i++) {
+      const v = Math.round(255 * (1 - symbol.pixels[i]));
+      img.data[i * 4] = v;
+      img.data[i * 4 + 1] = v;
+      img.data[i * 4 + 2] = v;
+      img.data[i * 4 + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+  }, [symbol]);
+
+  const shown = (c: string) => (c === '*' ? '·' : c);
+  const lowConfidence = symbol.confidence < 0.6;
+
+  return (
+    <div
+      className={`w-20 p-1.5 rounded-lg border text-center ${lowConfidence ? 'border-amber-300 bg-amber-50' : 'border-slate-200 bg-white'}`}
+      title={symbol.candidates.map((c) => `${shown(c.char)}: ${(c.confidence * 100).toFixed(1)}%`).join('\n')}
+    >
+      {symbol.pixels ? (
+        <canvas ref={canvasRef} width={28} height={28} className="w-14 h-14 mx-auto border border-slate-100 [image-rendering:pixelated]" />
+      ) : (
+        <div className="w-14 h-14 mx-auto flex items-center justify-center text-[10px] text-slate-400">by size</div>
+      )}
+      <div className="mt-1 font-mono text-sm font-semibold text-slate-900">
+        {shown(symbol.char)}
+        {symbol.isSuperscript && <sup className="text-[9px] text-slate-400"> exp</sup>}
+      </div>
+      <div className="text-[10px] text-slate-500">{(symbol.confidence * 100).toFixed(0)}%</div>
+      {symbol.candidates.length > 1 && (
+        <div className="text-[9px] text-slate-400 truncate">
+          then {shown(symbol.candidates[1].char)} {(symbol.candidates[1].confidence * 100).toFixed(0)}%
+        </div>
+      )}
     </div>
   );
 };

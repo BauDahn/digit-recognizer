@@ -6,6 +6,9 @@ import {
 } from '../../ml/alphanumericFeatures';
 import { SegmentedCharacter, AlphanumericFeatureBreakdown } from '../../types';
 import { Trash2, HelpCircle, Layers, Cpu, Compass, CheckCircle2 } from 'lucide-react';
+import { LoadedModel, loadBuiltinModel, fromModelFile, loadModelFromStorage } from '../../ml/modelFile';
+import { preprocessCanvasTo28x28 } from '../../ml/preprocessing';
+import { LettersTrainer } from './LettersTrainer';
 
 export const AlphanumericStudio: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -17,6 +20,25 @@ export const AlphanumericStudio: React.FC = () => {
 
   // Ambiguity lab active test pair
   const [activePairKey, setActivePairKey] = useState<'0_vs_O' | '1_vs_I' | '5_vs_S' | '8_vs_B' | '2_vs_Z'>('0_vs_O');
+
+  // Neural network trained on EMNIST Balanced (47 classes). A model the user trained
+  // in this browser takes precedence over the shipped pre-trained one.
+  const [model, setModel] = useState<LoadedModel | null>(null);
+  const [modelError, setModelError] = useState<string | null>(null);
+  useEffect(() => {
+    const saved = loadModelFromStorage('letters');
+    if (saved) {
+      try {
+        setModel(fromModelFile(saved));
+        return;
+      } catch {
+        // fall back to the pre-trained model
+      }
+    }
+    loadBuiltinModel('letters')
+      .then(setModel)
+      .catch((e) => setModelError(String(e?.message || e)));
+  }, []);
 
   // Initialize canvas
   useEffect(() => {
@@ -35,15 +57,35 @@ export const AlphanumericStudio: React.FC = () => {
     if (!canvas) return;
 
     const chars = segmentCharactersFromCanvas(canvas);
+
+    // Classify every segmented character with the network too (same MNIST-style preprocessing)
+    if (model) {
+      for (const c of chars) {
+        const { pixels } = preprocessCanvasTo28x28(canvas, c.box);
+        const { probabilities } = model.network.forward(pixels);
+        const ranked = model.classes
+          .map((char, i) => ({ char, confidence: probabilities[i] }))
+          .sort((a, b) => b.confidence - a.confidence)
+          .slice(0, 5);
+        c.nnPixels = pixels;
+        c.nnCandidates = ranked;
+        c.nnChar = ranked[0].char;
+      }
+    }
     setSegmentedChars(chars);
 
-    const str = chars.map((c) => c.predictedChar).join(' ');
+    const str = chars.map((c) => c.nnChar ?? c.predictedChar).join('');
     setRecognizedString(str);
 
     if (chars.length > 0 && !selectedCharId) {
       setSelectedCharId(chars[0].id);
     }
-  }, [selectedCharId]);
+  }, [selectedCharId, model]);
+
+  // Re-run recognition when the model changes (loaded or retrained)
+  useEffect(() => {
+    processCanvas();
+  }, [model]);
 
   // Pointer event handlers
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -179,7 +221,15 @@ export const AlphanumericStudio: React.FC = () => {
             Stage 2: Alphanumeric Studio (0–9, A–Z)
           </h1>
           <p className="text-xs text-slate-500 mt-1 max-w-2xl">
-            Expand beyond digits to full letters and alphanumeric codes. Write multiple characters to test connected-component segmentation, inspect Euler loops and symmetry, and resolve classic ambiguous handwriting pairs.
+            Expand beyond digits to letters. Characters are segmented, then classified by a neural network
+            trained on EMNIST (47 classes) and, for comparison, by hand-written rules based on loops and symmetry.
+          </p>
+          <p className="text-[11px] mt-1 text-slate-400">
+            {model
+              ? `Network: ${model.network.config.inputSize}-${model.network.config.hiddenSize1}-${model.network.config.hiddenSize2}-${model.network.config.outputSize}, ${model.meta?.trainedOn ?? 'EMNIST'}${model.meta?.testAccuracy ? `, ${(model.meta.testAccuracy * 100).toFixed(1)}% test accuracy` : ''}`
+              : modelError
+              ? `Network unavailable (${modelError}); using rules only.`
+              : 'Loading network…'}
           </p>
         </div>
 
@@ -273,7 +323,7 @@ export const AlphanumericStudio: React.FC = () => {
                     isSelected ? 'bg-indigo-600 text-white' : 'bg-slate-700 text-white'
                   }`}
                 >
-                  {sc.predictedChar}
+                  {sc.nnChar ?? sc.predictedChar}
                 </span>
               </div>
             );
@@ -289,6 +339,11 @@ export const AlphanumericStudio: React.FC = () => {
             <span className="text-lg font-mono font-bold text-slate-900 tracking-wider">
               {recognizedString || '— (Draw characters on canvas above)'}
             </span>
+            {segmentedChars.length > 0 && model && (
+              <span className="text-xs text-slate-400 font-mono">
+                rules only: {segmentedChars.map((c) => c.predictedChar).join('')}
+              </span>
+            )}
           </div>
 
           <div className="text-xs text-slate-500 font-mono">
@@ -314,7 +369,7 @@ export const AlphanumericStudio: React.FC = () => {
               <div className="flex items-center gap-1.5">
                 <span className="text-xs text-slate-500">Selected:</span>
                 <span className="w-7 h-7 flex items-center justify-center font-mono font-bold text-sm bg-slate-900 text-white rounded-md">
-                  {selectedChar.predictedChar}
+                  {selectedChar.nnChar ?? selectedChar.predictedChar}
                 </span>
               </div>
             )}
@@ -365,32 +420,28 @@ export const AlphanumericStudio: React.FC = () => {
                 </div>
               </div>
 
-              {/* Candidate Predictions */}
-              <div>
-                <span className="text-xs font-semibold text-slate-700 block mb-2">
-                  Top Character Candidates:
-                </span>
-                <div className="space-y-1.5">
-                  {selectedChar.candidates.map((cand, idx) => (
-                    <div key={cand.char} className="flex items-center gap-3 text-xs">
-                      <span className="w-5 font-mono font-bold text-slate-800 text-center">
-                        {cand.char}
-                      </span>
-                      <div className="flex-1 h-3 bg-slate-100 rounded-xs overflow-hidden">
-                        <div
-                          className={`h-full transition-all ${
-                            idx === 0 ? 'bg-slate-900' : 'bg-slate-300'
-                          }`}
-                          style={{ width: `${Math.round(cand.confidence * 100)}%` }}
-                        />
-                      </div>
-                      <span className="w-12 text-right font-mono text-slate-600 tabular-nums text-[11px]">
-                        {(cand.confidence * 100).toFixed(1)}%
-                      </span>
-                    </div>
-                  ))}
+              {/* Network vs. rules, side by side */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <span className="text-xs font-semibold text-slate-700 flex items-center gap-2 mb-2">
+                    Neural network (EMNIST)
+                    {selectedChar.nnPixels && <NetworkInput pixels={selectedChar.nnPixels} />}
+                  </span>
+                  {selectedChar.nnCandidates ? (
+                    <CandidateBars candidates={selectedChar.nnCandidates} />
+                  ) : (
+                    <div className="text-xs text-slate-400">Network not loaded</div>
+                  )}
+                </div>
+                <div>
+                  <span className="text-xs font-semibold text-slate-700 block mb-2">Hand-written rules (features above)</span>
+                  <CandidateBars candidates={selectedChar.candidates} />
                 </div>
               </div>
+              <p className="text-[11px] text-slate-400">
+                Note: EMNIST Balanced merges letters whose upper and lower case look alike (C/c, O/o, S/s, …), so the
+                network answers with one class for both.
+              </p>
             </div>
           ) : (
             <div className="py-12 text-center text-xs text-slate-400">
@@ -457,10 +508,55 @@ export const AlphanumericStudio: React.FC = () => {
           </div>
 
           <div className="text-[11px] text-slate-400">
-            Tip: Standard MNIST models fail on letters because they assume closed 10-class outputs. Alphanumeric recognition combines topology with neural embeddings to support all letters and digits.
+            Tip: a network trained only on MNIST can only answer 0-9: it has 10 output neurons. To read letters the
+            output layer must grow to 47 classes and the network must be trained on letters too.
           </div>
         </div>
       </div>
+
+      <LettersTrainer onModelTrained={setModel} />
     </div>
+  );
+};
+
+const CandidateBars: React.FC<{ candidates: Array<{ char: string; confidence: number }> }> = ({ candidates }) => (
+  <div className="space-y-1.5">
+    {candidates.map((cand, idx) => (
+      <div key={cand.char} className="flex items-center gap-3 text-xs">
+        <span className="w-5 font-mono font-bold text-slate-800 text-center">{cand.char}</span>
+        <div className="flex-1 h-3 bg-slate-100 rounded-xs overflow-hidden">
+          <div
+            className={`h-full transition-all ${idx === 0 ? 'bg-slate-900' : 'bg-slate-300'}`}
+            style={{ width: `${Math.round(cand.confidence * 100)}%` }}
+          />
+        </div>
+        <span className="w-12 text-right font-mono text-slate-600 tabular-nums text-[11px]">
+          {(cand.confidence * 100).toFixed(1)}%
+        </span>
+      </div>
+    ))}
+  </div>
+);
+
+const NetworkInput: React.FC<{ pixels: Float32Array }> = ({ pixels }) => {
+  const ref = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    const ctx = ref.current?.getContext('2d');
+    if (!ctx) return;
+    const img = ctx.createImageData(28, 28);
+    for (let i = 0; i < 784; i++) {
+      const v = Math.round(255 * pixels[i]);
+      img.data.set([v, v, v, 255], i * 4);
+    }
+    ctx.putImageData(img, 0, 0);
+  }, [pixels]);
+  return (
+    <canvas
+      ref={ref}
+      width={28}
+      height={28}
+      title="28x28 input the network sees"
+      className="w-7 h-7 rounded-xs bg-slate-900 [image-rendering:pixelated]"
+    />
   );
 };

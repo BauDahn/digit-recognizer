@@ -2,12 +2,42 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { NeuralNetwork } from '../../ml/neuralNetwork';
 import { createSyntheticDataset, generateSyntheticDigit } from '../../ml/syntheticDataset';
 import { getRealMnistSplits, MnistSampleInfo } from '../../ml/mnistLoader';
+import { DIGIT_CLASSES } from '../../ml/classes';
+import {
+  loadBuiltinModel,
+  loadModelFromStorage,
+  removeModelFromStorage,
+  saveModelToStorage,
+  toModelFile,
+} from '../../ml/modelFile';
+import {
+  createTrainerWorker,
+  getWeights,
+  packSamples,
+  setWeights,
+  TrainRequest,
+  WorkerMessage,
+} from '../../ml/trainingClient';
 import { preprocessCanvasTo28x28 } from '../../ml/preprocessing';
 import { PredictionResult, TrainingEpochMetric, TrainingSample } from '../../types';
 import { ConfusionMatrix } from './ConfusionMatrix';
 import { WeightVisualizer } from './WeightVisualizer';
 import { MnistGallery } from './MnistGallery';
-import { Play, Pause, RotateCcw, Plus, Trash2, Database, Sparkles, CheckCircle2 } from 'lucide-react';
+import { TrainingCharts } from './TrainingCharts';
+import { AugmentationPreview, LayerActivations } from './NetworkInsights';
+import {
+  Play,
+  Pause,
+  RotateCcw,
+  Plus,
+  Trash2,
+  Database,
+  Sparkles,
+  CheckCircle2,
+  Download,
+  Save,
+  Upload,
+} from 'lucide-react';
 
 interface DigitLabProps {
   network: NeuralNetwork;
@@ -15,6 +45,8 @@ interface DigitLabProps {
 }
 
 type DatasetSource = 'real-mnist' | 'synthetic';
+
+const STORAGE_KEY = 'digits';
 
 export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) => {
   // Drawing Canvas
@@ -29,43 +61,85 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
   const [isTraining, setIsTraining] = useState(false);
   const [currentEpoch, setCurrentEpoch] = useState(0);
   const [trainingMetrics, setTrainingMetrics] = useState<TrainingEpochMetric[]>([]);
-  const [epochsTarget, setEpochsTarget] = useState<number>(15);
-  const [learningRate, setLearningRate] = useState<number>(0.05);
+  const [epochsTarget, setEpochsTarget] = useState<number>(10);
+  const [learningRate, setLearningRate] = useState<number>(0.04);
   const [batchSize, setBatchSize] = useState<number>(16);
+  const [useAugmentation, setUseAugmentation] = useState(true);
+  const workerRef = useRef<Worker | null>(null);
 
   // Dataset selection: 'real-mnist' vs 'synthetic'
   const [datasetSource, setDatasetSource] = useState<DatasetSource>('real-mnist');
   const [dataset, setDataset] = useState<TrainingSample[]>([]);
   const [testDataset, setTestDataset] = useState<TrainingSample[]>([]);
+  const [datasetStatus, setDatasetStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [confusionMatrix, setConfusionMatrix] = useState<number[][]>(() =>
     Array.from({ length: 10 }, () => Array(10).fill(0))
   );
+  const [testAccuracy, setTestAccuracy] = useState<number | null>(null);
 
   // Custom sample label adding
   const [customLabel, setCustomLabel] = useState<number>(0);
   const [addedToast, setAddedToast] = useState<string | null>(null);
+  const [modelStatus, setModelStatus] = useState<string>('Untrained network (random weights)');
 
-  // Load dataset based on selected source
-  const loadDataset = useCallback((source: DatasetSource) => {
-    if (source === 'real-mnist') {
-      const { trainSet, testSet } = getRealMnistSplits(0.8);
-      setDataset(trainSet);
-      setTestDataset(testSet);
+  const showToast = useCallback((text: string) => {
+    setAddedToast(text);
+    setTimeout(() => setAddedToast(null), 3000);
+  }, []);
+
+  const refreshEvaluation = useCallback(
+    (testSet: TrainingSample[]) => {
+      if (testSet.length === 0) return;
       const evalRes = network.evaluate(testSet);
       setConfusionMatrix(evalRes.confusionMatrix);
-    } else {
-      const trainData = createSyntheticDataset(30);
-      const testData = createSyntheticDataset(10);
-      setDataset(trainData);
-      setTestDataset(testData);
-      const evalRes = network.evaluate(testData);
-      setConfusionMatrix(evalRes.confusionMatrix);
+      setTestAccuracy(evalRes.accuracy);
+    },
+    [network]
+  );
+
+  // Restore the model saved in this browser (once per session)
+  useEffect(() => {
+    if (network.isTrained) {
+      setModelStatus('Model trained in this session');
+      return;
     }
-  }, [network]);
+    const saved = loadModelFromStorage(STORAGE_KEY);
+    if (!saved) return;
+    try {
+      network.importWeights(JSON.stringify(saved));
+      setModelStatus(`Restored your saved model${saved.meta?.createdAt ? ` (${saved.meta.createdAt})` : ''}`);
+      onNetworkUpdate();
+    } catch {
+      removeModelFromStorage(STORAGE_KEY);
+    }
+  }, [network, onNetworkUpdate]);
+
+  // Load dataset based on selected source; custom samples the user taught are kept
+  const loadDataset = useCallback(
+    async (source: DatasetSource) => {
+      setDatasetStatus('loading');
+      try {
+        const { trainSet, testSet } =
+          source === 'real-mnist'
+            ? await getRealMnistSplits()
+            : { trainSet: createSyntheticDataset(30), testSet: createSyntheticDataset(10) };
+        setDataset((prev) => [...prev.filter((s) => s.isCustom), ...trainSet]);
+        setTestDataset(testSet);
+        refreshEvaluation(testSet);
+        setDatasetStatus('ready');
+      } catch (e) {
+        console.error(e);
+        setDatasetStatus('error');
+      }
+    },
+    [refreshEvaluation]
+  );
 
   useEffect(() => {
     loadDataset(datasetSource);
   }, [datasetSource, loadDataset]);
+
+  useEffect(() => () => workerRef.current?.terminate(), []);
 
   // Setup drawing canvas
   useEffect(() => {
@@ -184,7 +258,7 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
   // Add current drawn digit to training dataset
   const handleAddToDataset = () => {
     if (!prediction) {
-      alert('Please draw a digit first before adding to dataset.');
+      showToast('Draw a digit first, then choose its label and click "Teach Model".');
       return;
     }
 
@@ -196,8 +270,7 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
     };
 
     setDataset((prev) => [newSample, ...prev]);
-    setAddedToast(`Added handwritten sample as digit "${customLabel}"!`);
-    setTimeout(() => setAddedToast(null), 2500);
+    showToast(`Added your drawing as digit "${customLabel}". Train again to learn from it.`);
   };
 
   // Load authentic MNIST sample onto canvas
@@ -231,8 +304,7 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
     ctx.drawImage(tempCanvas, 0, 0, canvas.width, canvas.height);
 
     classifyCurrentCanvas();
-    setAddedToast(`Loaded authentic MNIST sample (Ground Truth: ${sample.label})`);
-    setTimeout(() => setAddedToast(null), 2500);
+    showToast(`Loaded MNIST test sample (true label: ${sample.label})`);
   };
 
   // Load sample digit onto canvas
@@ -267,70 +339,133 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
     classifyCurrentCanvas();
   };
 
-  // Train one epoch using requestAnimationFrame loop
-  const isTrainingRef = useRef(false);
-  isTrainingRef.current = isTraining;
-
-  const runTrainingStep = useCallback(
-    (epoch: number) => {
-      if (!isTrainingRef.current || epoch > epochsTarget) {
-        setIsTraining(false);
-        return;
-      }
-
-      // Update network hyperparameters
-      network.config.learningRate = learningRate;
-      network.config.batchSize = batchSize;
-
-      // Train epoch
-      const metric = network.trainEpoch(dataset);
-      setCurrentEpoch(epoch);
-
-      // Evaluate on test dataset
-      const evalRes = network.evaluate(testDataset);
-      setConfusionMatrix(evalRes.confusionMatrix);
-
-      setTrainingMetrics((prev) => [
-        ...prev,
-        {
-          epoch,
-          loss: metric.loss,
-          accuracy: evalRes.accuracy,
-        },
-      ]);
-
-      onNetworkUpdate();
-
-      // Next epoch
-      if (epoch < epochsTarget) {
-        setTimeout(() => runTrainingStep(epoch + 1), 60);
-      } else {
-        setIsTraining(false);
-      }
+  const persistModel = useCallback(
+    (accuracy: number | null, epochs: number) => {
+      const file = toModelFile('digits', DIGIT_CLASSES, network, {
+        trainedOn: datasetSource === 'real-mnist' ? 'MNIST subset (browser)' : 'Synthetic digits (browser)',
+        testAccuracy: accuracy ?? undefined,
+        epochs,
+        createdAt: new Date().toISOString().slice(0, 10),
+      });
+      const ok = saveModelToStorage(STORAGE_KEY, file);
+      setModelStatus(ok ? 'Model trained here and saved in this browser' : 'Model trained here (could not save it)');
     },
-    [batchSize, dataset, epochsTarget, learningRate, network, onNetworkUpdate, testDataset]
+    [datasetSource, network]
   );
 
+  // Training runs in a Web Worker: the UI keeps responding while the network learns
   const handleStartTraining = () => {
+    if (dataset.length === 0 || testDataset.length === 0) return;
+    workerRef.current?.terminate();
+    const worker = createTrainerWorker();
+    workerRef.current = worker;
+
+    const startEpoch = trainingMetrics.length > 0 ? trainingMetrics[trainingMetrics.length - 1].epoch : 0;
     setIsTraining(true);
-    setCurrentEpoch(0);
-    setTrainingMetrics([]);
-    setTimeout(() => runTrainingStep(1), 50);
+
+    worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
+      const msg = event.data;
+      if (msg.type === 'epoch') {
+        setWeights(network, msg.weights);
+        const epoch = startEpoch + msg.epoch;
+        setCurrentEpoch(epoch);
+        setConfusionMatrix(msg.confusionMatrix);
+        setTestAccuracy(msg.testAccuracy);
+        setTrainingMetrics((prev) => [
+          ...prev,
+          { epoch, loss: msg.loss, accuracy: msg.testAccuracy, trainAccuracy: msg.trainAccuracy, seconds: msg.seconds },
+        ]);
+        persistModel(msg.testAccuracy, epoch);
+        classifyCurrentCanvas();
+        onNetworkUpdate();
+      } else {
+        if (msg.type === 'error') showToast(`Training failed: ${msg.message}`);
+        worker.terminate();
+        workerRef.current = null;
+        setIsTraining(false);
+      }
+    };
+
+    const request: TrainRequest = {
+      type: 'train',
+      config: { ...network.config, learningRate, batchSize },
+      initialWeights: network.isTrained ? getWeights(network) : null,
+      train: packSamples(dataset),
+      test: packSamples(testDataset),
+      epochs: epochsTarget,
+      augmentProbability: useAugmentation ? 0.5 : 0,
+    };
+    worker.postMessage(request);
   };
 
+  // Stopping = terminating the worker. The weights of the last finished epoch are kept.
   const handleStopTraining = () => {
+    workerRef.current?.terminate();
+    workerRef.current = null;
     setIsTraining(false);
   };
 
   const handleResetWeights = () => {
-    setIsTraining(false);
+    handleStopTraining();
     network.initWeightsHe();
     setCurrentEpoch(0);
     setTrainingMetrics([]);
-    const evalRes = network.evaluate(testDataset);
-    setConfusionMatrix(evalRes.confusionMatrix);
+    removeModelFromStorage(STORAGE_KEY);
+    setModelStatus('Untrained network (random weights)');
+    refreshEvaluation(testDataset);
     classifyCurrentCanvas();
     onNetworkUpdate();
+  };
+
+  const handleLoadPretrained = async () => {
+    try {
+      const model = await loadBuiltinModel('digits');
+      network.copyWeightsFrom(model.network);
+      setTrainingMetrics([]);
+      setCurrentEpoch(0);
+      const acc = model.meta?.testAccuracy;
+      setModelStatus(
+        `Pre-trained on ${model.meta?.trainedOn ?? 'MNIST'}${acc ? ` (${(acc * 100).toFixed(1)}% on the full test set)` : ''}`
+      );
+      refreshEvaluation(testDataset);
+      classifyCurrentCanvas();
+      onNetworkUpdate();
+    } catch (e: any) {
+      showToast(`Could not load the pre-trained model: ${e?.message || e}`);
+    }
+  };
+
+  const handleExportModel = () => {
+    const file = toModelFile('digits', DIGIT_CLASSES, network, {
+      testAccuracy: testAccuracy ?? undefined,
+      createdAt: new Date().toISOString().slice(0, 10),
+    });
+    const blob = new Blob([JSON.stringify(file)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'neuroscribe-digits-model.json';
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+  const handleImportModel = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileInput = e.target.files?.[0];
+    e.target.value = '';
+    if (!fileInput) return;
+    try {
+      network.importWeights(await fileInput.text());
+      setTrainingMetrics([]);
+      setCurrentEpoch(0);
+      persistModel(null, 0);
+      setModelStatus(`Imported ${fileInput.name}`);
+      refreshEvaluation(testDataset);
+      classifyCurrentCanvas();
+      onNetworkUpdate();
+    } catch (err: any) {
+      showToast(`Import failed: ${err?.message || err}`);
+    }
   };
 
   return (
@@ -531,9 +666,51 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
                 Neural Training Engine
               </span>
               <span className="text-xs text-slate-500 font-mono">
-                {dataset.length} samples
+                {datasetStatus === 'loading'
+                  ? 'loading…'
+                  : `${dataset.length} train · ${testDataset.length} test`}
               </span>
             </div>
+
+            {/* Current model + persistence */}
+            <div className="mb-4 p-3 bg-slate-50 rounded-lg border border-slate-100 space-y-2">
+              <div className="text-xs text-slate-700">
+                <span className="font-semibold">Model: </span>
+                {modelStatus}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  onClick={handleLoadPretrained}
+                  disabled={isTraining}
+                  className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium bg-white border border-slate-200 rounded-md hover:bg-slate-100 disabled:opacity-50"
+                  title="Load weights trained on the full MNIST dataset (60,000 images)"
+                >
+                  <Download className="w-3 h-3" /> Pre-trained
+                </button>
+                <button
+                  onClick={handleExportModel}
+                  className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium bg-white border border-slate-200 rounded-md hover:bg-slate-100"
+                  title="Download the current weights as a .json file"
+                >
+                  <Save className="w-3 h-3" /> Export
+                </button>
+                <button
+                  onClick={() => importInputRef.current?.click()}
+                  disabled={isTraining}
+                  className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium bg-white border border-slate-200 rounded-md hover:bg-slate-100 disabled:opacity-50"
+                  title="Load weights from a .json file exported before"
+                >
+                  <Upload className="w-3 h-3" /> Import
+                </button>
+                <input ref={importInputRef} type="file" accept="application/json,.json" className="hidden" onChange={handleImportModel} />
+              </div>
+            </div>
+
+            {datasetStatus === 'error' && (
+              <div className="mb-3 text-xs text-rose-700 bg-rose-50 px-3 py-1.5 rounded-md">
+                Could not load the MNIST files from /datasets. Run <code>npm run build:datasets</code>.
+              </div>
+            )}
 
             {/* Hyperparameters */}
             <div className="space-y-3 mb-4 text-xs">
@@ -575,9 +752,9 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
                 </div>
                 <input
                   type="range"
-                  min="5"
+                  min="1"
                   max="30"
-                  step="5"
+                  step="1"
                   value={epochsTarget}
                   onChange={(e) => setEpochsTarget(Number(e.target.value))}
                   disabled={isTraining}
@@ -601,6 +778,17 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
                   className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer"
                 />
               </div>
+
+              <label className="flex items-center justify-between cursor-pointer">
+                <span className="text-slate-600">Data augmentation</span>
+                <input
+                  type="checkbox"
+                  checked={useAugmentation}
+                  onChange={(e) => setUseAugmentation(e.target.checked)}
+                  disabled={isTraining}
+                  className="accent-slate-900"
+                />
+              </label>
 
               <div className="flex items-center justify-between">
                 <span className="text-slate-600">Batch Size</span>
@@ -628,10 +816,11 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
               {!isTraining ? (
                 <button
                   onClick={handleStartTraining}
+                  disabled={datasetStatus !== 'ready'}
                   className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 bg-slate-900 text-white rounded-lg text-xs font-medium hover:bg-slate-800 transition-colors shadow-xs"
                 >
                   <Play className="w-3.5 h-3.5 fill-current" />
-                  <span>Train Model</span>
+                  <span>{trainingMetrics.length > 0 || network.isTrained ? 'Continue Training' : 'Train Model'}</span>
                 </button>
               ) : (
                 <button
@@ -639,7 +828,7 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
                   className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 bg-amber-600 text-white rounded-lg text-xs font-medium hover:bg-amber-700 transition-colors shadow-xs"
                 >
                   <Pause className="w-3.5 h-3.5 fill-current" />
-                  <span>Pause</span>
+                  <span>Stop (keeps last epoch)</span>
                 </button>
               )}
 
@@ -658,15 +847,16 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
               <div className="flex justify-between text-xs">
                 <span className="text-slate-500">Epoch:</span>
                 <span className="font-mono font-semibold text-slate-800">
-                  {currentEpoch} / {epochsTarget}
+                  {currentEpoch}
+                  {isTraining && trainingMetrics.length > 0 && trainingMetrics[trainingMetrics.length - 1].seconds !== undefined
+                    ? ` (${trainingMetrics[trainingMetrics.length - 1].seconds!.toFixed(1)}s / epoch)`
+                    : ''}
                 </span>
               </div>
               <div className="flex justify-between text-xs">
                 <span className="text-slate-500">Validation Accuracy:</span>
                 <span className="font-mono font-semibold text-emerald-600">
-                  {trainingMetrics.length > 0
-                    ? `${(trainingMetrics[trainingMetrics.length - 1].accuracy * 100).toFixed(1)}%`
-                    : '—'}
+                  {testAccuracy !== null ? `${(testAccuracy * 100).toFixed(1)}%` : '—'}
                 </span>
               </div>
               <div className="flex justify-between text-xs">
@@ -679,29 +869,18 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
               </div>
             </div>
 
-            {/* Sparkline mini-chart of Accuracy */}
-            {trainingMetrics.length > 1 && (
-              <div className="mt-3">
-                <div className="text-[11px] text-slate-400 mb-1">Accuracy Progression</div>
-                <div className="h-14 w-full bg-slate-50 rounded border border-slate-100 relative overflow-hidden flex items-end">
-                  <svg className="w-full h-full" preserveAspectRatio="none" viewBox="0 0 100 50">
-                    <polyline
-                      fill="none"
-                      stroke="#0f172a"
-                      strokeWidth="2"
-                      points={trainingMetrics
-                        .map((m, idx) => {
-                          const x = (idx / (trainingMetrics.length - 1)) * 100;
-                          const y = 50 - m.accuracy * 45;
-                          return `${x},${y}`;
-                        })
-                        .join(' ')}
-                    />
-                  </svg>
-                </div>
-              </div>
-            )}
+            <TrainingCharts metrics={trainingMetrics} />
           </div>
+        </div>
+      </div>
+
+      {/* What happens inside: activations per layer + data augmentation */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <div className="lg:col-span-7">
+          <LayerActivations network={network} pixels={activePixels} />
+        </div>
+        <div className="lg:col-span-5">
+          <AugmentationPreview pixels={activePixels} enabled={useAugmentation} />
         </div>
       </div>
 

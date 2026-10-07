@@ -97,7 +97,8 @@ export const SymbolLibraryModal: React.FC<SymbolLibraryModalProps> = ({
               Mathematical & Alphanumeric Symbol Catalog
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              NeuroScribe recognizes Greek letters, calculus operators, logic, and algebra notation.
+              LaTeX reference for sticky notes. The handwriting network on the canvas reads digits, + − / = ( ), x,
+              dots and exponents.
             </p>
           </div>
           <button

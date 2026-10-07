@@ -3,6 +3,10 @@ import { Stroke, Point, MathRecognitionResult, MathCanvasCard } from '../../type
 import { MathResultModal } from './MathResultModal';
 import { FunctionGraphCard } from './FunctionGraphCard';
 import katex from 'katex';
+import { loadBuiltinModel } from '../../ml/modelFile';
+import { displayChar, recognizeStrokes } from '../../ml/strokeRecognizer';
+import { solve } from '../../ml/mathParser';
+import { textToStrokes } from '../../ml/handwritingGlyphs';
 import {
   PenTool,
   Highlighter,
@@ -491,119 +495,104 @@ export const InfiniteMathCanvas: React.FC = () => {
     });
   };
 
-  // Recognize Math with Gemini 3.8 Flash
+  // Recognize the handwriting locally: strokes -> symbols (neural network) -> expression -> solver
   const handleRecognizeMath = async () => {
     if (strokes.length === 0) {
-      alert('Please write mathematical equations, symbols, or expressions first.');
+      setAutoSolveToast('Write a math expression first (e.g. 12 + 7 =).');
+      setTimeout(() => setAutoSolveToast(null), 3000);
       return;
     }
 
     setIsRecognizing(true);
+    setIsModalOpen(true);
     try {
-      // Find bounding box of relevant strokes (either selected or all strokes)
-      const targetStrokes =
-        selectedStrokeIds.length > 0
-          ? strokes.filter((s) => selectedStrokeIds.includes(s.id))
-          : strokes;
+      const targetStrokes = (
+        selectedStrokeIds.length > 0 ? strokes.filter((s) => selectedStrokeIds.includes(s.id)) : strokes
+      ).filter((s) => s.tool === 'pen' && s.points.length > 0 && !s.id.startsWith('answer-'));
+
+      if (targetStrokes.length === 0) throw new Error('No pen strokes to recognize.');
+
+      const model = await loadBuiltinModel('symbols');
+      const { symbols, expression } = recognizeStrokes(
+        targetStrokes.map((s) => s.points),
+        model
+      );
+      const solved = solve(expression);
 
       let minX = Infinity,
         minY = Infinity,
         maxX = -Infinity,
         maxY = -Infinity;
-
-      for (const st of targetStrokes) {
-        for (const p of st.points) {
-          if (p.x < minX) minX = p.x;
-          if (p.x > maxX) maxX = p.x;
-          if (p.y < minY) minY = p.y;
-          if (p.y > maxY) maxY = p.y;
-        }
+      for (const sym of symbols) {
+        minX = Math.min(minX, sym.box.x);
+        minY = Math.min(minY, sym.box.y);
+        maxX = Math.max(maxX, sym.box.x + sym.box.width);
+        maxY = Math.max(maxY, sym.box.y + sym.box.height);
       }
 
-      const padding = 30;
-      const cropW = Math.max(80, maxX - minX + padding * 2);
-      const cropH = Math.max(80, maxY - minY + padding * 2);
-
-      // Render offscreen canvas with white background and ink
-      const offCanvas = document.createElement('canvas');
-      offCanvas.width = Math.min(1600, cropW);
-      offCanvas.height = Math.min(1600, cropH);
-      const offCtx = offCanvas.getContext('2d');
-      if (!offCtx) throw new Error('Could not create offscreen context');
-
-      offCtx.fillStyle = '#ffffff';
-      offCtx.fillRect(0, 0, offCanvas.width, offCanvas.height);
-
-      offCtx.translate(padding - minX, padding - minY);
-
-      for (const st of targetStrokes) {
-        if (st.points.length < 1) continue;
-        offCtx.save();
-        offCtx.strokeStyle = st.color === '#ffffff' ? '#0f172a' : st.color;
-        offCtx.lineWidth = Math.max(3, st.width);
-        offCtx.lineCap = 'round';
-        offCtx.lineJoin = 'round';
-
-        offCtx.beginPath();
-        offCtx.moveTo(st.points[0].x, st.points[0].y);
-        for (let i = 1; i < st.points.length; i++) {
-          const midX = (st.points[i - 1].x + st.points[i].x) / 2;
-          const midY = (st.points[i - 1].y + st.points[i].y) / 2;
-          offCtx.quadraticCurveTo(st.points[i - 1].x, st.points[i - 1].y, midX, midY);
-        }
-        offCtx.lineTo(st.points[st.points.length - 1].x, st.points[st.points.length - 1].y);
-        offCtx.stroke();
-        offCtx.restore();
-      }
-
-      const base64Data = offCanvas.toDataURL('image/png');
-
-      const response = await fetch('/api/math/recognize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: base64Data }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Recognition failed: ${response.statusText}`);
-      }
-
-      const data: MathRecognitionResult = await response.json();
-      data.rawBoundingBox = { x: minX, y: minY, width: cropW, height: cropH };
+      const data: MathRecognitionResult = {
+        latex: solved.latex,
+        readableText: solved.readableText,
+        symbolsDetected: symbols.map((s) => displayChar(s.char)),
+        symbols,
+        isSolvable: solved.kind === 'evaluation' || solved.kind === 'equation',
+        solution: solved.solution,
+        autoAnswer: solved.answer,
+        steps: solved.steps,
+        isGraphable: solved.kind === 'function',
+        graphExpr: solved.graphExpr,
+        graphTitle: solved.kind === 'function' ? solved.readableText : undefined,
+        error: solved.error,
+        rawBoundingBox: { x: minX, y: minY, width: maxX - minX, height: maxY - minY },
+      };
       setRecognitionResult(data);
-      setIsModalOpen(true);
 
-      // Auto-Math Solve on '=': If an autoAnswer is provided, write it directly onto the canvas!
-      if (data.autoAnswer && data.isSolvable) {
-        // Append solved text right next to the right edge of the formula
-        const answerX = maxX + 18;
-        const answerY = (minY + maxY) / 2;
+      // Auto-solve on '=': write the answer right after the equal sign, like a notebook would
+      if (solved.kind === 'evaluation' && solved.answer && expression.endsWith('=')) {
+        const lineHeight = Math.max(20, maxY - minY);
+        const answerStrokes: Stroke[] = textToStrokes(solved.answer, maxX + lineHeight * 0.3, minY, lineHeight).map(
+          (points, i) => ({
+            id: `answer-${Date.now()}-${i}`,
+            points,
+            color: '#2563eb',
+            width: 3.5,
+            tool: 'pen',
+          })
+        );
+        pushToHistory([...strokes, ...answerStrokes]);
+      }
 
-        // Auto-show a delightful notification
-        setAutoSolveToast(`Recognized: "${data.readableText}" → Solution: ${data.autoAnswer}`);
-        setTimeout(() => setAutoSolveToast(null), 4000);
+      setAutoSolveToast(
+        solved.error
+          ? `Recognized "${expression}" but: ${solved.error}`
+          : `Recognized: "${expression}"${solved.answer ? ` → ${solved.answer}` : ''}`
+      );
+      setTimeout(() => setAutoSolveToast(null), 4000);
 
-        // If graphable, automatically place a function graph card on the canvas!
-        if (data.isGraphable && data.graphJsExpr) {
-          const cardId = `graph-${Date.now()}`;
-          setCards((prev) => [
-            ...prev,
-            {
-              id: cardId,
-              x: maxX + 40,
-              y: minY,
-              width: 320,
-              height: 220,
-              type: 'graph-plot',
-              title: data.graphTitle || data.readableText,
-              graphJsExpr: data.graphJsExpr,
-            },
-          ]);
-        }
+      if (solved.kind === 'function' && solved.graphExpr) {
+        setCards((prev) => [
+          ...prev,
+          {
+            id: `graph-${Date.now()}`,
+            x: maxX + 40,
+            y: minY,
+            width: 320,
+            height: 220,
+            type: 'graph-plot',
+            title: solved.readableText,
+            graphExpr: solved.graphExpr,
+          },
+        ]);
       }
     } catch (err: any) {
       console.error('Recognition error:', err);
-      alert('Failed to recognize math: ' + (err?.message || 'Check network connection'));
+      setRecognitionResult({
+        latex: '',
+        readableText: '',
+        symbolsDetected: [],
+        isSolvable: false,
+        error: err?.message || String(err),
+      });
     } finally {
       setIsRecognizing(false);
     }
@@ -629,226 +618,16 @@ export const InfiniteMathCanvas: React.FC = () => {
     setCards((prev) => [...prev, newCard]);
   };
 
-  // Load sample math handwriting presets onto the canvas
-  const handleLoadMathPreset = (type: 'quadratic' | 'integral' | 'arithmetic' | 'calculus') => {
-    const center = screenToWorld(400, 260);
-    const cx = center.x;
-    const cy = center.y;
-
-    const sampleStrokes: Stroke[] = [];
-
-    if (type === 'arithmetic') {
-      // Draw "24 * 3 + 8 ="
-      const color = '#0f172a';
-      // '2'
-      sampleStrokes.push({
-        id: `s-${Date.now()}-1`,
-        color,
-        width: 3.5,
-        tool: 'pen',
-        points: [
-          { x: cx, y: cy },
-          { x: cx + 15, y: cy - 15 },
-          { x: cx + 25, y: cy },
-          { x: cx, y: cy + 40 },
-          { x: cx + 30, y: cy + 40 },
-        ],
-      });
-      // '4'
-      sampleStrokes.push({
-        id: `s-${Date.now()}-2`,
-        color,
-        width: 3.5,
-        tool: 'pen',
-        points: [
-          { x: cx + 55, y: cy - 10 },
-          { x: cx + 40, y: cy + 20 },
-          { x: cx + 70, y: cy + 20 },
-        ],
-      });
-      sampleStrokes.push({
-        id: `s-${Date.now()}-3`,
-        color,
-        width: 3.5,
-        tool: 'pen',
-        points: [
-          { x: cx + 58, y: cy },
-          { x: cx + 58, y: cy + 40 },
-        ],
-      });
-      // '+'
-      sampleStrokes.push({
-        id: `s-${Date.now()}-4`,
-        color,
-        width: 3.5,
-        tool: 'pen',
-        points: [
-          { x: cx + 90, y: cy + 18 },
-          { x: cx + 115, y: cy + 18 },
-        ],
-      });
-      sampleStrokes.push({
-        id: `s-${Date.now()}-5`,
-        color,
-        width: 3.5,
-        tool: 'pen',
-        points: [
-          { x: cx + 102, y: cy + 5 },
-          { x: cx + 102, y: cy + 30 },
-        ],
-      });
-      // '16'
-      sampleStrokes.push({
-        id: `s-${Date.now()}-6`,
-        color,
-        width: 3.5,
-        tool: 'pen',
-        points: [
-          { x: cx + 135, y: cy },
-          { x: cx + 135, y: cy + 40 },
-        ],
-      });
-      sampleStrokes.push({
-        id: `s-${Date.now()}-7`,
-        color,
-        width: 3.5,
-        tool: 'pen',
-        points: [
-          { x: cx + 165, y: cy },
-          { x: cx + 150, y: cy + 30 },
-          { x: cx + 165, y: cy + 40 },
-          { x: cx + 175, y: cy + 30 },
-          { x: cx + 150, y: cy + 25 },
-        ],
-      });
-      // '='
-      sampleStrokes.push({
-        id: `s-${Date.now()}-8`,
-        color,
-        width: 3.5,
-        tool: 'pen',
-        points: [
-          { x: cx + 195, y: cy + 14 },
-          { x: cx + 220, y: cy + 14 },
-        ],
-      });
-      sampleStrokes.push({
-        id: `s-${Date.now()}-9`,
-        color,
-        width: 3.5,
-        tool: 'pen',
-        points: [
-          { x: cx + 195, y: cy + 24 },
-          { x: cx + 220, y: cy + 24 },
-        ],
-      });
-    } else {
-      // Function y = x^2 - 4
-      const color = '#0f172a';
-      // 'y'
-      sampleStrokes.push({
-        id: `s-${Date.now()}-y`,
-        color,
-        width: 3.5,
-        tool: 'pen',
-        points: [
-          { x: cx, y: cy },
-          { x: cx + 10, y: cy + 20 },
-          { x: cx + 20, y: cy },
-          { x: cx + 5, y: cy + 45 },
-        ],
-      });
-      // '='
-      sampleStrokes.push({
-        id: `s-${Date.now()}-eq1`,
-        color,
-        width: 3.5,
-        tool: 'pen',
-        points: [
-          { x: cx + 35, y: cy + 12 },
-          { x: cx + 55, y: cy + 12 },
-        ],
-      });
-      sampleStrokes.push({
-        id: `s-${Date.now()}-eq2`,
-        color,
-        width: 3.5,
-        tool: 'pen',
-        points: [
-          { x: cx + 35, y: cy + 22 },
-          { x: cx + 55, y: cy + 22 },
-        ],
-      });
-      // 'x'
-      sampleStrokes.push({
-        id: `s-${Date.now()}-x1`,
-        color,
-        width: 3.5,
-        tool: 'pen',
-        points: [
-          { x: cx + 70, y: cy + 5 },
-          { x: cx + 95, y: cy + 35 },
-        ],
-      });
-      sampleStrokes.push({
-        id: `s-${Date.now()}-x2`,
-        color,
-        width: 3.5,
-        tool: 'pen',
-        points: [
-          { x: cx + 95, y: cy + 5 },
-          { x: cx + 70, y: cy + 35 },
-        ],
-      });
-      // '^2'
-      sampleStrokes.push({
-        id: `s-${Date.now()}-exp`,
-        color,
-        width: 3,
-        tool: 'pen',
-        points: [
-          { x: cx + 105, y: cy - 10 },
-          { x: cx + 115, y: cy - 18 },
-          { x: cx + 122, y: cy - 10 },
-          { x: cx + 105, y: cy + 5 },
-          { x: cx + 125, y: cy + 5 },
-        ],
-      });
-      // '-'
-      sampleStrokes.push({
-        id: `s-${Date.now()}-minus`,
-        color,
-        width: 3.5,
-        tool: 'pen',
-        points: [
-          { x: cx + 135, y: cy + 18 },
-          { x: cx + 155, y: cy + 18 },
-        ],
-      });
-      // '4'
-      sampleStrokes.push({
-        id: `s-${Date.now()}-4a`,
-        color,
-        width: 3.5,
-        tool: 'pen',
-        points: [
-          { x: cx + 180, y: cy + 2 },
-          { x: cx + 165, y: cy + 24 },
-          { x: cx + 195, y: cy + 24 },
-        ],
-      });
-      sampleStrokes.push({
-        id: `s-${Date.now()}-4b`,
-        color,
-        width: 3.5,
-        tool: 'pen',
-        points: [
-          { x: cx + 183, y: cy + 10 },
-          { x: cx + 183, y: cy + 38 },
-        ],
-      });
-    }
-
+  // Write an example expression on the canvas with the built-in handwriting glyphs
+  const handleLoadMathPreset = (text: string) => {
+    const origin = screenToWorld(300, 220);
+    const sampleStrokes: Stroke[] = textToStrokes(text, origin.x, origin.y, 48).map((points, i) => ({
+      id: `preset-${Date.now()}-${i}`,
+      points,
+      color: '#0f172a',
+      width: 3.5,
+      tool: 'pen',
+    }));
     pushToHistory([...strokes, ...sampleStrokes]);
   };
 
@@ -874,202 +653,205 @@ export const InfiniteMathCanvas: React.FC = () => {
 
   return (
     <div className="relative w-full h-[calc(100vh-61px)] overflow-hidden flex flex-col bg-slate-100 select-none">
-      {/* Top Floating Toolbar (OneNote Ribbon style) */}
-      <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 bg-white/95 backdrop-blur-md border border-slate-200 shadow-md rounded-xl px-3 py-2 flex items-center gap-3">
-        {/* Tool Selector */}
-        <div className="flex items-center gap-1 p-0.5 bg-slate-100 rounded-lg">
-          <button
-            onClick={() => setCurrentTool('pen')}
-            className={`p-2 rounded-md transition-colors ${
-              currentTool === 'pen'
-                ? 'bg-white text-slate-900 shadow-2xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-            title="Pen (Natural handwriting)"
-          >
-            <PenTool className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => setCurrentTool('highlighter')}
-            className={`p-2 rounded-md transition-colors ${
-              currentTool === 'highlighter'
-                ? 'bg-white text-amber-600 shadow-2xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-            title="Highlighter (Semi-transparent)"
-          >
-            <Highlighter className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => setCurrentTool('eraser')}
-            className={`p-2 rounded-md transition-colors ${
-              currentTool === 'eraser'
-                ? 'bg-white text-rose-600 shadow-2xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-            title="Stroke Eraser (Deletes entire stroke on contact)"
-          >
-            <Eraser className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => setCurrentTool('lasso')}
-            className={`p-2 rounded-md transition-colors ${
-              currentTool === 'lasso'
-                ? 'bg-white text-indigo-600 shadow-2xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-            title="Lasso Selection (Circle math strokes to recognize or move)"
-          >
-            <Lasso className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => setCurrentTool('hand')}
-            className={`p-2 rounded-md transition-colors ${
-              currentTool === 'hand'
-                ? 'bg-white text-slate-900 shadow-2xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-            title="Hand Pan Tool"
-          >
-            <Hand className="w-4 h-4" />
-          </button>
-        </div>
-
-        <div className="h-5 w-px bg-slate-200" />
-
-        {/* Color Palette */}
-        <div className="flex items-center gap-1.5">
-          {[
-            { color: '#0f172a', name: 'Ink Black' },
-            { color: '#2563eb', name: 'Royal Blue' },
-            { color: '#059669', name: 'Emerald' },
-            { color: '#dc2626', name: 'Crimson' },
-            { color: '#7c3aed', name: 'Amethyst' },
-            { color: '#d97706', name: 'Amber' },
-          ].map((c) => (
+      {/* Top toolbars: one wrapping row so they never overlap on narrow screens */}
+      <div className="absolute top-3 inset-x-4 z-20 flex flex-wrap items-start justify-center gap-2 pointer-events-none">
+        {/* Top Floating Toolbar (OneNote Ribbon style) */}
+        <div className="pointer-events-auto bg-white/95 backdrop-blur-md border border-slate-200 shadow-md rounded-xl px-3 py-2 flex items-center gap-3">
+          {/* Tool Selector */}
+          <div className="flex items-center gap-1 p-0.5 bg-slate-100 rounded-lg">
             <button
-              key={c.color}
-              onClick={() => {
-                setPenColor(c.color);
-                if (currentTool === 'eraser' || currentTool === 'hand') setCurrentTool('pen');
-              }}
-              style={{ backgroundColor: c.color }}
-              title={c.name}
-              className={`w-5 h-5 rounded-full transition-transform ${
-                penColor === c.color ? 'scale-125 ring-2 ring-slate-400 ring-offset-1' : 'hover:scale-110'
+              onClick={() => setCurrentTool('pen')}
+              className={`p-2 rounded-md transition-colors ${
+                currentTool === 'pen'
+                  ? 'bg-white text-slate-900 shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
               }`}
-            />
-          ))}
-        </div>
-
-        <div className="h-5 w-px bg-slate-200" />
-
-        {/* Stroke Thickness */}
-        <div className="flex items-center gap-1">
-          {[
-            { size: 2.2, label: 'Fine' },
-            { size: 3.8, label: 'Medium' },
-            { size: 6.5, label: 'Bold' },
-          ].map((t) => (
-            <button
-              key={t.label}
-              onClick={() => setPenWidth(t.size)}
-              className={`px-2 py-1 text-xs rounded transition-colors ${
-                penWidth === t.size
-                  ? 'bg-slate-200 text-slate-900 font-semibold'
-                  : 'text-slate-600 hover:bg-slate-100'
-              }`}
+              title="Pen (Natural handwriting)"
             >
-              {t.label}
+              <PenTool className="w-4 h-4" />
             </button>
-          ))}
+            <button
+              onClick={() => setCurrentTool('highlighter')}
+              className={`p-2 rounded-md transition-colors ${
+                currentTool === 'highlighter'
+                  ? 'bg-white text-amber-600 shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+              title="Highlighter (Semi-transparent)"
+            >
+              <Highlighter className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => setCurrentTool('eraser')}
+              className={`p-2 rounded-md transition-colors ${
+                currentTool === 'eraser'
+                  ? 'bg-white text-rose-600 shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+              title="Stroke Eraser (Deletes entire stroke on contact)"
+            >
+              <Eraser className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => setCurrentTool('lasso')}
+              className={`p-2 rounded-md transition-colors ${
+                currentTool === 'lasso'
+                  ? 'bg-white text-indigo-600 shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+              title="Lasso Selection (Circle math strokes to recognize or move)"
+            >
+              <Lasso className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => setCurrentTool('hand')}
+              className={`p-2 rounded-md transition-colors ${
+                currentTool === 'hand'
+                  ? 'bg-white text-slate-900 shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+              title="Hand Pan Tool"
+            >
+              <Hand className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="h-5 w-px bg-slate-200" />
+
+          {/* Color Palette */}
+          <div className="flex items-center gap-1.5">
+            {[
+              { color: '#0f172a', name: 'Ink Black' },
+              { color: '#2563eb', name: 'Royal Blue' },
+              { color: '#059669', name: 'Emerald' },
+              { color: '#dc2626', name: 'Crimson' },
+              { color: '#7c3aed', name: 'Amethyst' },
+              { color: '#d97706', name: 'Amber' },
+            ].map((c) => (
+              <button
+                key={c.color}
+                onClick={() => {
+                  setPenColor(c.color);
+                  if (currentTool === 'eraser' || currentTool === 'hand') setCurrentTool('pen');
+                }}
+                style={{ backgroundColor: c.color }}
+                title={c.name}
+                className={`w-5 h-5 rounded-full transition-transform ${
+                  penColor === c.color ? 'scale-125 ring-2 ring-slate-400 ring-offset-1' : 'hover:scale-110'
+                }`}
+              />
+            ))}
+          </div>
+
+          <div className="h-5 w-px bg-slate-200" />
+
+          {/* Stroke Thickness */}
+          <div className="flex items-center gap-1">
+            {[
+              { size: 2.2, label: 'Fine' },
+              { size: 3.8, label: 'Medium' },
+              { size: 6.5, label: 'Bold' },
+            ].map((t) => (
+              <button
+                key={t.label}
+                onClick={() => setPenWidth(t.size)}
+                className={`px-2 py-1 text-xs rounded transition-colors ${
+                  penWidth === t.size
+                    ? 'bg-slate-200 text-slate-900 font-semibold'
+                    : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="h-5 w-px bg-slate-200" />
+
+          {/* Math OCR & Solve Action Button */}
+          <button
+            onClick={handleRecognizeMath}
+            disabled={isRecognizing}
+            className="flex items-center gap-1.5 px-3.5 py-1.5 bg-slate-900 text-white rounded-lg text-xs font-semibold hover:bg-slate-800 transition-all shadow-xs hover:shadow"
+            title="Convert handwriting to LaTeX and compute step-by-step solutions"
+          >
+            {isRecognizing ? (
+              <>
+                <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                <span>Recognizing...</span>
+              </>
+            ) : (
+              <>
+                <Calculator className="w-3.5 h-3.5" />
+                <span>Recognize & Solve Math</span>
+              </>
+            )}
+          </button>
         </div>
 
-        <div className="h-5 w-px bg-slate-200" />
+        {/* Top Right Quick Settings (Paper Styles, Preset Formulas, Export) */}
+        <div className="pointer-events-auto flex items-center gap-2">
+          {/* Preset Math equations drop-in */}
+          <div className="bg-white/95 backdrop-blur-md border border-slate-200 shadow-xs rounded-xl p-1 flex items-center gap-1">
+            <span className="text-[11px] font-medium text-slate-500 px-2">Presets:</span>
+            {[
+              { text: '24+16=', label: '24 + 16 =' },
+              { text: '2x+3=11', label: '2x + 3 = 11' },
+              { text: 'x^2-4', label: 'x² - 4' },
+            ].map((preset) => (
+              <button
+                key={preset.text}
+                onClick={() => handleLoadMathPreset(preset.text)}
+                className="px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 rounded text-slate-700 transition-colors"
+                title={`Write '${preset.label}' by hand on the canvas`}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
 
-        {/* Math OCR & Solve Action Button */}
-        <button
-          onClick={handleRecognizeMath}
-          disabled={isRecognizing}
-          className="flex items-center gap-1.5 px-3.5 py-1.5 bg-slate-900 text-white rounded-lg text-xs font-semibold hover:bg-slate-800 transition-all shadow-xs hover:shadow"
-          title="Convert handwriting to LaTeX and compute step-by-step solutions"
-        >
-          {isRecognizing ? (
-            <>
-              <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-              <span>Recognizing...</span>
-            </>
-          ) : (
-            <>
-              <Calculator className="w-3.5 h-3.5" />
-              <span>Recognize & Solve Math</span>
-            </>
-          )}
-        </button>
-      </div>
+          {/* Paper style selector */}
+          <div className="bg-white/95 backdrop-blur-md border border-slate-200 shadow-xs rounded-xl p-1 flex items-center gap-1">
+            <button
+              onClick={() => setPaperStyle('lined')}
+              className={`p-1.5 rounded-md ${paperStyle === 'lined' ? 'bg-slate-200 text-slate-900' : 'text-slate-500 hover:bg-slate-100'}`}
+              title="Lined Notebook Paper"
+            >
+              <FileText className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => setPaperStyle('grid')}
+              className={`p-1.5 rounded-md ${paperStyle === 'grid' ? 'bg-slate-200 text-slate-900' : 'text-slate-500 hover:bg-slate-100'}`}
+              title="Math 5mm Grid Paper"
+            >
+              <Grid className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => setPaperStyle('dots')}
+              className={`p-1.5 rounded-md ${paperStyle === 'dots' ? 'bg-slate-200 text-slate-900' : 'text-slate-500 hover:bg-slate-100'}`}
+              title="Dot Grid Paper"
+            >
+              <CircleDot className="w-4 h-4" />
+            </button>
+          </div>
 
-      {/* Top Right Quick Settings (Paper Styles, Preset Formulas, Export) */}
-      <div className="absolute top-3 right-4 z-20 flex items-center gap-2">
-        {/* Preset Math equations drop-in */}
-        <div className="bg-white/95 backdrop-blur-md border border-slate-200 shadow-xs rounded-xl p-1 flex items-center gap-1">
-          <span className="text-[11px] font-medium text-slate-500 px-2">Presets:</span>
-          <button
-            onClick={() => handleLoadMathPreset('arithmetic')}
-            className="px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 rounded text-slate-700 transition-colors"
-            title="Load sample equation '24 + 16 ='"
-          >
-            24 + 16 =
-          </button>
-          <button
-            onClick={() => handleLoadMathPreset('quadratic')}
-            className="px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 rounded text-slate-700 transition-colors"
-            title="Load function 'y = x^2 - 4'"
-          >
-            y = x² - 4
-          </button>
-        </div>
-
-        {/* Paper style selector */}
-        <div className="bg-white/95 backdrop-blur-md border border-slate-200 shadow-xs rounded-xl p-1 flex items-center gap-1">
-          <button
-            onClick={() => setPaperStyle('lined')}
-            className={`p-1.5 rounded-md ${paperStyle === 'lined' ? 'bg-slate-200 text-slate-900' : 'text-slate-500 hover:bg-slate-100'}`}
-            title="Lined Notebook Paper"
-          >
-            <FileText className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => setPaperStyle('grid')}
-            className={`p-1.5 rounded-md ${paperStyle === 'grid' ? 'bg-slate-200 text-slate-900' : 'text-slate-500 hover:bg-slate-100'}`}
-            title="Math 5mm Grid Paper"
-          >
-            <Grid className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => setPaperStyle('dots')}
-            className={`p-1.5 rounded-md ${paperStyle === 'dots' ? 'bg-slate-200 text-slate-900' : 'text-slate-500 hover:bg-slate-100'}`}
-            title="Dot Grid Paper"
-          >
-            <CircleDot className="w-4 h-4" />
-          </button>
-        </div>
-
-        {/* Export / Clear */}
-        <div className="bg-white/95 backdrop-blur-md border border-slate-200 shadow-xs rounded-xl p-1 flex items-center gap-1">
-          <button
-            onClick={handleExportPNG}
-            className="p-1.5 text-slate-600 hover:text-slate-900 rounded hover:bg-slate-100"
-            title="Export note to PNG"
-          >
-            <Download className="w-4 h-4" />
-          </button>
-          <button
-            onClick={handleClearAll}
-            className="p-1.5 text-slate-500 hover:text-rose-600 rounded hover:bg-slate-100"
-            title="Clear canvas"
-          >
-            <Trash2 className="w-4 h-4" />
-          </button>
+          {/* Export / Clear */}
+          <div className="bg-white/95 backdrop-blur-md border border-slate-200 shadow-xs rounded-xl p-1 flex items-center gap-1">
+            <button
+              onClick={handleExportPNG}
+              className="p-1.5 text-slate-600 hover:text-slate-900 rounded hover:bg-slate-100"
+              title="Export note to PNG"
+            >
+              <Download className="w-4 h-4" />
+            </button>
+            <button
+              onClick={handleClearAll}
+              className="p-1.5 text-slate-500 hover:text-rose-600 rounded hover:bg-slate-100"
+              title="Clear canvas"
+            >
+              <Trash2 className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1166,7 +948,7 @@ export const InfiniteMathCanvas: React.FC = () => {
         {cards.map((card) => {
           const screenPos = worldToScreen(card.x, card.y);
 
-          if (card.type === 'graph-plot' && card.graphJsExpr) {
+          if (card.type === 'graph-plot' && card.graphExpr) {
             return (
               <div
                 key={card.id}
@@ -1185,7 +967,7 @@ export const InfiniteMathCanvas: React.FC = () => {
                   width={card.width}
                   height={card.height}
                   title={card.title || 'Function Graph'}
-                  jsExpr={card.graphJsExpr}
+                  expr={card.graphExpr}
                   onClose={() => setCards((prev) => prev.filter((c) => c.id !== card.id))}
                 />
               </div>

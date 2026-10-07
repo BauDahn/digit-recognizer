@@ -1,5 +1,6 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState, useMemo } from 'react';
 import { X, ZoomIn, ZoomOut, Move } from 'lucide-react';
+import { compileFunction } from '../../ml/mathParser';
 
 interface FunctionGraphCardProps {
   id: string;
@@ -8,7 +9,7 @@ interface FunctionGraphCardProps {
   width: number;
   height: number;
   title: string;
-  jsExpr: string; // e.g. "Math.pow(x, 2) - 4" or "Math.sin(x)"
+  expr: string; // expression in x, e.g. "x^2-4"
   onClose: () => void;
 }
 
@@ -19,20 +20,27 @@ export const FunctionGraphCard: React.FC<FunctionGraphCardProps> = ({
   width = 340,
   height = 240,
   title,
-  jsExpr,
+  expr,
   onClose,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [domain, setDomain] = useState<[number, number]>([-10, 10]);
   const [hoverCoord, setHoverCoord] = useState<{ x: number; y: number } | null>(null);
 
-  // Evaluate function safely
-  const evalFunc = (xVal: number): number | null => {
+  // Parse once with our own math parser (no eval), then evaluate point by point
+  const fn = useMemo(() => {
     try {
-      // Create safe scoped evaluator
-      const fn = new Function('x', 'Math', `return ${jsExpr};`);
-      const res = fn(xVal, Math);
-      return typeof res === 'number' && !isNaN(res) && isFinite(res) ? res : null;
+      return compileFunction(expr);
+    } catch {
+      return null;
+    }
+  }, [expr]);
+
+  const evalFunc = (xVal: number): number | null => {
+    if (!fn) return null;
+    try {
+      const res = fn(xVal);
+      return Number.isFinite(res) ? res : null;
     } catch {
       return null;
     }
@@ -134,7 +142,7 @@ export const FunctionGraphCard: React.FC<FunctionGraphCardProps> = ({
       ctx.arc(sx, sy, 4, 0, Math.PI * 2);
       ctx.fill();
     }
-  }, [domain, jsExpr, hoverCoord]);
+  }, [domain, fn, hoverCoord]);
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { loadRealMnistSamples, MnistSampleInfo } from '../../ml/mnistLoader';
+import { loadMnistGallerySamples, MnistSampleInfo } from '../../ml/mnistLoader';
 import { Database, Eye, ArrowRight } from 'lucide-react';
 
 interface MnistGalleryProps {
@@ -9,10 +9,12 @@ interface MnistGalleryProps {
 export const MnistGallery: React.FC<MnistGalleryProps> = ({ onSelectSample }) => {
   const [samples, setSamples] = useState<MnistSampleInfo[]>([]);
   const [filterDigit, setFilterDigit] = useState<number | 'all'>('all');
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    const list = loadRealMnistSamples();
-    setSamples(list);
+    loadMnistGallerySamples()
+      .then(setSamples)
+      .catch((e) => setLoadError(String(e?.message || e)));
   }, []);
 
   const filtered = filterDigit === 'all' ? samples : samples.filter((s) => s.label === filterDigit);
@@ -29,7 +31,7 @@ export const MnistGallery: React.FC<MnistGalleryProps> = ({ onSelectSample }) =>
               Official Real MNIST Dataset Browser (Yann LeCun / NIST)
             </h3>
             <p className="text-xs text-slate-500">
-              600 authentic 28×28 grayscale handwritten digits extracted from the original MNIST benchmark
+              Real 28×28 grayscale digits from the MNIST test split (never used for training)
             </p>
           </div>
         </div>
@@ -61,6 +63,8 @@ export const MnistGallery: React.FC<MnistGalleryProps> = ({ onSelectSample }) =>
           ))}
         </div>
       </div>
+
+      {loadError && <div className="text-xs text-rose-600">Could not load MNIST: {loadError}</div>}
 
       {/* Grid of mini MNIST sample thumbnails */}
       <div className="grid grid-cols-6 sm:grid-cols-10 md:grid-cols-12 lg:grid-cols-15 gap-2 max-h-48 overflow-y-auto p-2 bg-slate-50 border border-slate-200 rounded-lg">

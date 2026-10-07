@@ -66,7 +66,7 @@ export const Header: React.FC<HeaderProps> = ({
         <button
           onClick={onOpenSymbolLibrary}
           className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md transition-colors whitespace-nowrap"
-          title="Browse recognizable mathematical symbols, Greek letters, and calculus notation"
+          title="LaTeX symbol reference (Greek letters, calculus, logic)"
         >
           <BookOpen className="w-3.5 h-3.5 text-slate-500" />
           <span>Symbol Library</span>
