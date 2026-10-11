@@ -10,6 +10,18 @@ NeuroScribe is a personal project I built to learn how neural networks and a han
 >
 > **Live demo:** https://baudahn.github.io/digit-recognizer/ · **Lab:** https://baudahn.github.io/digit-recognizer/lab.html
 
+## Screenshots
+
+**The app**: handwritten arithmetic is read, typeset and solved, and every symbol the network read is shown with its confidence so it can be corrected.
+
+![The handwriting app reading and solving three sums](docs/screenshots/app.png)
+
+**The lab**: train a network in the browser and look inside it (network graph, parameters, weight dynamics, per-class metrics, confusion matrix, first-layer filters).
+
+<img src="docs/screenshots/lab.png" alt="The Digit Neural Lab" width="560">
+
+## Built with AI
+
 **It was built mostly with AI.** Nearly all of the code was written by [Claude Code](https://claude.com/claude-code) (Anthropic's coding agent) working from my instructions. I did not hand-write most of it, and I would rather say so up front than leave you guessing. My part was the work around the code:
 
 - **Defining the product**: what it should do, what "done" looks like, and which features are worth building (a canvas that reads layout, a lab to look inside the networks, learning from user corrections).
