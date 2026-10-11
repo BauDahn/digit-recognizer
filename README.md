@@ -12,9 +12,9 @@ NeuroScribe is a personal project I built to learn how neural networks and a han
 
 ## Screenshots
 
-**The app**: handwritten arithmetic is read, typeset and solved, and every symbol the network read is shown with its confidence so it can be corrected.
+**The app**: handwritten arithmetic is read, typeset and solved in place, and every symbol the network read is shown with its confidence so it can be corrected.
 
-![The handwriting app reading and solving three sums](docs/screenshots/app.png)
+![The handwriting app reading and solving three expressions](docs/screenshots/app.png)
 
 **The lab**: train a network in the browser and look inside it (network graph, parameters, weight dynamics, per-class metrics, confusion matrix, first-layer filters).
 
