@@ -55,14 +55,14 @@ export async function loadMnist(split: 'train' | 'test'): Promise<IdxDataset> {
   return readIdxPair(readFileSync(imgs), readFileSync(lbls));
 }
 
-/** EMNIST Balanced. Requires the `unzip` command (the official archive is a ~560MB zip). */
-export async function loadEmnistBalanced(split: 'train' | 'test'): Promise<IdxDataset> {
+/** An EMNIST split. Requires the `unzip` command (the official archive is a ~560MB zip). */
+export async function loadEmnist(kind: 'balanced' | 'byclass', split: 'train' | 'test'): Promise<IdxDataset> {
   const zip = await downloadCached(EMNIST_ZIP_URL, 'emnist-gzip.zip');
   const extract = (name: string) =>
     new Uint8Array(execFileSync('unzip', ['-p', zip, `gzip/${name}`], { maxBuffer: 1 << 30 }));
   const ds = readIdxPair(
-    extract(`emnist-balanced-${split}-images-idx3-ubyte.gz`),
-    extract(`emnist-balanced-${split}-labels-idx1-ubyte.gz`)
+    extract(`emnist-${kind}-${split}-images-idx3-ubyte.gz`),
+    extract(`emnist-${kind}-${split}-labels-idx1-ubyte.gz`)
   );
   // EMNIST images are stored transposed (column-major); flip them to match MNIST.
   const fixed = new Uint8Array(ds.images.length);
@@ -73,6 +73,10 @@ export async function loadEmnistBalanced(split: 'train' | 'test'): Promise<IdxDa
     }
   }
   return { labels: ds.labels, images: fixed };
+}
+
+export function loadEmnistBalanced(split: 'train' | 'test'): Promise<IdxDataset> {
+  return loadEmnist('balanced', split);
 }
 
 /** Take up to `perClass` samples of every class, preserving dataset order (deterministic). */

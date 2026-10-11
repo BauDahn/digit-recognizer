@@ -1,5 +1,3 @@
-export type AppMode = 'digit-lab' | 'alphanumeric' | 'infinite-canvas';
-
 export interface Point {
   x: number;
   y: number;
@@ -13,6 +11,8 @@ export interface Stroke {
   color: string;
   width: number;
   tool: 'pen' | 'highlighter' | 'eraser';
+  /** Set on the handwritten answers the app adds after '=': the id of the line they answer. */
+  answerFor?: string;
 }
 
 export interface TrainingSample {
@@ -73,39 +73,21 @@ export interface SegmentedCharacter {
   nnCandidates?: Array<{ char: string; confidence: number }>;
 }
 
-export interface MathRecognitionResult {
-  latex: string;
-  readableText: string;
-  symbolsDetected: string[];
-  isSolvable: boolean;
-  solution?: string;
-  autoAnswer?: string;
-  steps?: string[];
-  isGraphable?: boolean;
-  graphExpr?: string; // expression in x, parsed by src/ml/mathParser (never evaluated as JS)
-  graphTitle?: string;
-  error?: string;
-  symbols?: Array<{
-    char: string;
-    confidence: number;
-    candidates: Array<{ char: string; confidence: number }>;
-    pixels: Float32Array | null;
-    isSuperscript: boolean;
-  }>;
-  rawBoundingBox?: { x: number; y: number; width: number; height: number };
-}
-
 export interface MathCanvasCard {
   id: string;
   x: number;
   y: number;
   width: number;
   height: number;
-  type: 'math-solution' | 'graph-plot';
+  type: 'math-solution' | 'graph-plot' | 'image';
+  /** Set on cards the app adds as the result of a line: the id of that line */
+  answerFor?: string;
   title?: string;
   latex?: string;
   solution?: string;
   autoAnswer?: string;
   steps?: string[];
   graphExpr?: string;
+  /** type 'image': a pasted exercise, as a data URL; it is drawn under the ink */
+  src?: string;
 }

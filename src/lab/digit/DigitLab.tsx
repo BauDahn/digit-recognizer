@@ -25,6 +25,8 @@ import { WeightVisualizer } from './WeightVisualizer';
 import { MnistGallery } from './MnistGallery';
 import { TrainingCharts } from './TrainingCharts';
 import { AugmentationPreview, LayerActivations } from './NetworkInsights';
+import { LabInsights } from '../insights/LabInsights';
+import { useWeightTracker } from '../insights/useWeightTracker';
 import {
   Play,
   Pause,
@@ -78,6 +80,7 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
   const [testAccuracy, setTestAccuracy] = useState<number | null>(null);
 
   // Custom sample label adding
+  const tracker = useWeightTracker(network);
   const [customLabel, setCustomLabel] = useState<number>(0);
   const [addedToast, setAddedToast] = useState<string | null>(null);
   const [modelStatus, setModelStatus] = useState<string>('Untrained network (random weights)');
@@ -113,6 +116,17 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
       removeModelFromStorage(STORAGE_KEY);
     }
   }, [network, onNetworkUpdate]);
+
+  // Metrics always describe the weights the network has now (a model may be loaded before or after the test set)
+  useEffect(() => {
+    if (!isTraining && testDataset.length > 0) refreshEvaluation(testDataset);
+  }, [testDataset, modelStatus, isTraining, refreshEvaluation]);
+
+  // The weights at this moment are where the weight-change tracking starts from
+  useEffect(() => {
+    tracker.reset();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Load dataset based on selected source; custom samples the user taught are kept
   const loadDataset = useCallback(
@@ -361,13 +375,21 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
     workerRef.current = worker;
 
     const startEpoch = trainingMetrics.length > 0 ? trainingMetrics[trainingMetrics.length - 1].epoch : 0;
+    tracker.rebase();
     setIsTraining(true);
 
     worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
       const msg = event.data;
-      if (msg.type === 'epoch') {
+      if (msg.type === 'progress') {
+        // weights in the middle of an epoch: let the diagram show the neurons being adjusted
+        setWeights(network, msg.weights);
+        tracker.recordUpdate(startEpoch + msg.epoch - 1 + msg.fraction);
+        classifyCurrentCanvas();
+        onNetworkUpdate();
+      } else if (msg.type === 'epoch') {
         setWeights(network, msg.weights);
         const epoch = startEpoch + msg.epoch;
+        tracker.recordUpdate(epoch);
         setCurrentEpoch(epoch);
         setConfusionMatrix(msg.confusionMatrix);
         setTestAccuracy(msg.testAccuracy);
@@ -394,6 +416,7 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
       test: packSamples(testDataset),
       epochs: epochsTarget,
       augmentProbability: useAugmentation ? 0.5 : 0,
+      updatesPerEpoch: 5,
     };
     worker.postMessage(request);
   };
@@ -408,6 +431,7 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
   const handleResetWeights = () => {
     handleStopTraining();
     network.initWeightsHe();
+    tracker.reset();
     setCurrentEpoch(0);
     setTrainingMetrics([]);
     removeModelFromStorage(STORAGE_KEY);
@@ -421,6 +445,7 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
     try {
       const model = await loadBuiltinModel('digits');
       network.copyWeightsFrom(model.network);
+      tracker.reset();
       setTrainingMetrics([]);
       setCurrentEpoch(0);
       const acc = model.meta?.testAccuracy;
@@ -456,6 +481,7 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
     if (!fileInput) return;
     try {
       network.importWeights(await fileInput.text());
+      tracker.reset();
       setTrainingMetrics([]);
       setCurrentEpoch(0);
       persistModel(null, 0);
@@ -474,7 +500,7 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-200">
         <div>
           <h1 className="text-xl font-bold text-slate-900 tracking-tight">
-            Stage 1: Digit Neural Lab
+            Digit Neural Lab
           </h1>
           <p className="text-xs text-slate-500 mt-1 max-w-2xl">
             Train a real neural network (Multi-Layer Perceptron) with Backpropagation directly inside your browser. Draw digits, inspect the 28×28 center-of-mass pre-processing, observe live activation filters, and analyze the 10×10 confusion matrix.
@@ -873,6 +899,17 @@ export const DigitLab: React.FC<DigitLabProps> = ({ network, onNetworkUpdate }) 
           </div>
         </div>
       </div>
+
+      {/* Inside the network: graph, parameters, weight dynamics and metrics */}
+      <LabInsights
+        network={network}
+        classes={DIGIT_CLASSES}
+        pixels={activePixels}
+        tracker={tracker}
+        confusion={confusionMatrix}
+        training={isTraining}
+        hyper={{ learningRate, momentum: network.config.momentum, batchSize, epochs: epochsTarget, augmentation: useAugmentation }}
+      />
 
       {/* What happens inside: activations per layer + data augmentation */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">

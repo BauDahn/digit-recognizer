@@ -1,65 +1,152 @@
 /**
- * Small math engine for the handwriting canvas. No `eval`/`new Function`:
- * a tokenizer + recursive-descent parser build an AST that we can evaluate,
- * simplify step by step, print as text/LaTeX and solve simple equations with.
+ * Tokenizer and recursive-descent parser for the text the handwriting recognizer produces.
  *
- * Grammar (lowest to highest precedence):
- *   equation := expr ('=' expr?)?
- *   expr     := term (('+' | '-') term)*
- *   term     := unary (('*' | '/') unary | implicit-multiplication)*
- *   unary    := '-' unary | power
- *   power    := atom ('^' unary)?
- *   atom     := number | 'x' | '(' expr ')'
+ *   relation := expr (relop expr)?
+ *   expr     := term (('+' | '-' | '±') term)*
+ *   term     := unary (('*' | '/') unary | implicit multiplication)*
+ *   unary    := ('-' | '+') unary | power
+ *   power    := postfix ('^' unary)?
+ *   postfix  := atom '!'*
+ *   atom     := number | variable | constant | '(' expr ')' | '|' expr '|' | function argument
+ *             | 'Σ'/'∏' ['_' group] ['^' group] term | '∫' ['_' group] ['^' group] expr 'd' variable
+ *             | '√' atom | \frac(a,b) | \sqrt(a) | \root(n,a)
+ *
+ * Structure coming from the page layout is written as `^(…)`, `_(…)`, `\frac(a,b)` and `\sqrt(a)`.
+ * A fraction like d/dx or ∂f/∂x becomes a derivative operator.
  */
+import { bin, EMPTY, evaluate, MathSyntaxError, Node, num, RelOp, variable } from './mathAst';
 
-export type Node =
-  | { kind: 'num'; value: number }
-  | { kind: 'var' }
-  | { kind: 'neg'; arg: Node }
-  | { kind: 'bin'; op: '+' | '-' | '*' | '/' | '^'; left: Node; right: Node };
+type Token =
+  | { type: 'num'; value: number }
+  | { type: 'id'; name: string }
+  | { type: 'const'; name: 'π' | 'e' | '∞' }
+  | { type: 'fn'; name: string }
+  | { type: 'big'; name: 'Σ' | '∏' | '∫' }
+  | { type: 'cmd'; name: 'frac' | 'sqrt' | 'root' }
+  | { type: 'op'; value: string };
 
-type Token = { type: 'num'; value: number } | { type: 'var' } | { type: 'op'; value: string };
+// longer names first: 'sinh' before 'sin'
+const FUNCTION_NAMES = ['softplus', 'sigmoid', 'arcsin', 'arccos', 'arctan', 'swish', 'sqrt', 'sinh', 'cosh', 'tanh', 'sin', 'cos', 'tan', 'cot', 'sec', 'csc', 'ln', 'log', 'exp'];
+const SUPERSCRIPT_DIGITS = '⁰¹²³⁴⁵⁶⁷⁸⁹';
+const OPS = '+-*/^_()=<>!,|%';
+const OP_ALIASES: Record<string, string> = {
+  '×': '*',
+  '·': '*',
+  '∘': '*',
+  '÷': '/',
+  '−': '-',
+  '[': '(',
+  ']': ')',
+  '{': '(',
+  '}': ')',
+  '⟨': '(',
+  '⟩': ')',
+  '≤': '≤',
+  '≥': '≥',
+  '≠': '≠',
+  '≈': '≈',
+  '±': '±',
+};
+const GREEK = /[α-ωΑ-Ω]/;
 
-export class MathSyntaxError extends Error {}
-
-export function tokenize(input: string): Token[] {
+/**
+ * `userFunctions` are names the page defines itself (f(x) = …, swish(x) = …): they are functions
+ * wherever they are followed by '('. σ followed by '(' is the sigmoid.
+ */
+export function tokenize(input: string, userFunctions: ReadonlySet<string> = new Set()): Token[] {
   const tokens: Token[] = [];
-  const src = input.replace(/\s+/g, '').replace(/[×·]/g, '*').replace(/÷/g, '/').replace(/−/g, '-');
+  const src = input.replace(/\s+/g, '');
+  const userNames = [...userFunctions].sort((a, b) => b.length - a.length);
   let i = 0;
   while (i < src.length) {
     const ch = src[i];
-    if (/[0-9.]/.test(ch)) {
+    const user = userNames.find((name) => src.startsWith(name, i) && src[i + name.length] === '(');
+    if (user) {
+      tokens.push({ type: 'fn', name: user });
+      i += user.length;
+    } else if (/[0-9.]/.test(ch)) {
       let j = i;
       while (j < src.length && /[0-9.]/.test(src[j])) j++;
       const text = src.slice(i, j);
-      if ((text.match(/\./g) || []).length > 1 || text === '.') {
-        throw new MathSyntaxError(`Invalid number: ${text}`);
-      }
+      if ((text.match(/\./g) || []).length > 1 || text === '.') throw new MathSyntaxError(`Invalid number: ${text}`);
       tokens.push({ type: 'num', value: parseFloat(text) });
       i = j;
-    } else if (ch === 'x' || ch === 'X') {
-      tokens.push({ type: 'var' });
+    } else if (SUPERSCRIPT_DIGITS.includes(ch)) {
+      // x² is x^(2)
+      let j = i;
+      let digits = '';
+      while (j < src.length && SUPERSCRIPT_DIGITS.includes(src[j])) digits += SUPERSCRIPT_DIGITS.indexOf(src[j++]);
+      tokens.push({ type: 'op', value: '^' }, { type: 'op', value: '(' }, { type: 'num', value: Number(digits) }, { type: 'op', value: ')' });
+      i = j;
+    } else if (ch === '\\') {
+      const m = /^\\(frac|sqrt|root)/.exec(src.slice(i));
+      if (!m) throw new MathSyntaxError('Unknown command');
+      tokens.push({ type: 'cmd', name: m[1] as 'frac' | 'sqrt' | 'root' });
+      i += m[0].length;
+    } else if (/[A-Za-z]/.test(ch)) {
+      const fn = FUNCTION_NAMES.find((name) => src.startsWith(name, i));
+      if (fn) {
+        tokens.push({ type: 'fn', name: fn });
+        i += fn.length;
+      } else if (ch === 'e') {
+        tokens.push({ type: 'const', name: 'e' });
+        i++;
+      } else {
+        tokens.push({ type: 'id', name: ch });
+        i++;
+      }
+    } else if (ch === 'π') {
+      tokens.push({ type: 'const', name: 'π' });
       i++;
-    } else if ('+-*/^()='.includes(ch)) {
+    } else if (ch === '∞') {
+      tokens.push({ type: 'const', name: '∞' });
+      i++;
+    } else if (ch === 'Σ' || ch === '∑' || ch === '∏' || ch === '∫' || ch === '∮') {
+      tokens.push({ type: 'big', name: ch === '∮' ? '∫' : ch === '∑' ? 'Σ' : ch });
+      i++;
+    } else if (ch === 'σ' && src[i + 1] === '(') {
+      tokens.push({ type: 'fn', name: 'sigmoid' });
+      i++;
+    } else if (GREEK.test(ch) || ch === '∂' || ch === 'ℓ') {
+      tokens.push({ type: 'id', name: ch });
+      i++;
+    } else if (ch === '√') {
+      tokens.push({ type: 'cmd', name: 'sqrt' });
+      i++;
+    } else if (ch === '⌊' || ch === '⌋' || ch === '⌈' || ch === '⌉') {
       tokens.push({ type: 'op', value: ch });
       i++;
+    } else if (OPS.includes(ch) || OP_ALIASES[ch]) {
+      tokens.push({ type: 'op', value: OP_ALIASES[ch] ?? ch });
+      i++;
     } else {
-      throw new MathSyntaxError(`Unknown symbol: ${ch}`);
+      throw new MathSyntaxError(`Cannot compute with the symbol "${ch}"`);
     }
   }
   return tokens;
 }
 
+const REL_OPS = new Set(['=', '<', '>', '≤', '≥', '≠', '≈']);
+
 class Parser {
   private pos = 0;
+  /** Inside |…| a second '|' closes instead of opening. */
+  private absDepth = 0;
+  /** Inside an integral, "d x" ends the integrand. */
+  private integralDepth = 0;
+
   constructor(private tokens: Token[]) {}
 
-  private peek(): Token | undefined {
-    return this.tokens[this.pos];
+  atEnd(): boolean {
+    return this.pos >= this.tokens.length;
   }
 
-  private isOp(value: string): boolean {
-    const t = this.peek();
+  private peek(offset = 0): Token | undefined {
+    return this.tokens[this.pos + offset];
+  }
+
+  private isOp(value: string, offset = 0): boolean {
+    const t = this.peek(offset);
     return t?.type === 'op' && t.value === value;
   }
 
@@ -68,15 +155,23 @@ class Parser {
     this.pos++;
   }
 
-  atEnd(): boolean {
-    return this.pos >= this.tokens.length;
+  /** relation := expr (relop expr)? ; the right side may be empty ("12+7=") */
+  parseRelation(): Node {
+    const left = this.parseExpr();
+    const t = this.peek();
+    if (t?.type === 'op' && REL_OPS.has(t.value)) {
+      this.pos++;
+      if (this.atEnd()) return { kind: 'rel', op: t.value as RelOp, left, right: EMPTY };
+      return { kind: 'rel', op: t.value as RelOp, left, right: this.parseExpr() };
+    }
+    return left;
   }
 
   parseExpr(): Node {
     let node = this.parseTerm();
-    while (this.isOp('+') || this.isOp('-')) {
-      const op = (this.tokens[this.pos++] as { value: '+' | '-' }).value;
-      node = { kind: 'bin', op, left: node, right: this.parseTerm() };
+    while (this.isOp('+') || this.isOp('-') || this.isOp('±')) {
+      const op = (this.tokens[this.pos++] as { value: '+' | '-' | '±' }).value;
+      node = bin(op, node, this.parseTerm());
     }
     return node;
   }
@@ -86,19 +181,38 @@ class Parser {
     for (;;) {
       if (this.isOp('*') || this.isOp('/')) {
         const op = (this.tokens[this.pos++] as { value: '*' | '/' }).value;
-        node = { kind: 'bin', op, left: node, right: this.parseUnary() };
+        node = bin(op, node, this.parseUnary());
       } else if (this.startsAtom()) {
         // Implicit multiplication: 2x, 3(x+1), (x+1)(x-1)
-        node = { kind: 'bin', op: '*', left: node, right: this.parsePower() };
+        node = bin('*', node, this.parsePower());
       } else {
         return node;
       }
     }
   }
 
+  private isDifferentialAhead(): boolean {
+    const t = this.peek();
+    const next = this.peek(1);
+    return t?.type === 'id' && (t.name === 'd' || t.name === 'δ') && next?.type === 'id';
+  }
+
   private startsAtom(): boolean {
     const t = this.peek();
-    return !!t && (t.type === 'num' || t.type === 'var' || (t.type === 'op' && t.value === '('));
+    if (!t) return false;
+    if (this.integralDepth > 0 && this.isDifferentialAhead()) return false;
+    switch (t.type) {
+      case 'num':
+      case 'id':
+      case 'const':
+      case 'fn':
+      case 'big':
+      case 'cmd':
+        return true;
+      case 'op':
+        if (t.value === '|') return this.absDepth === 0;
+        return t.value === '(' || t.value === '⌊' || t.value === '⌈';
+    }
   }
 
   private parseUnary(): Node {
@@ -114,336 +228,281 @@ class Parser {
   }
 
   private parsePower(): Node {
-    const base = this.parseAtom();
+    let base = this.parsePostfix();
+    // a subscript may come before the exponent: x_1^2
+    if (this.isOp('_')) {
+      this.pos++;
+      const sub = this.parseScriptGroup();
+      base = this.attachSubscript(base, sub);
+    }
     if (this.isOp('^')) {
       this.pos++;
-      return { kind: 'bin', op: '^', left: base, right: this.parseUnary() };
+      return bin('^', base, this.parseScriptGroup(true));
     }
     return base;
   }
 
-  private parseAtom(): Node {
-    const t = this.peek();
-    if (!t) throw new MathSyntaxError('The expression is incomplete');
-    if (t.type === 'num') {
-      this.pos++;
-      return { kind: 'num', value: t.value };
-    }
-    if (t.type === 'var') {
-      this.pos++;
-      return { kind: 'var' };
-    }
-    if (t.value === '(') {
+  /** Content of a ^ or _ : a parenthesized group, or a single atom. */
+  private parseScriptGroup(allowUnary = false): Node {
+    if (this.isOp('(')) {
       this.pos++;
       const inner = this.parseExpr();
       this.expectOp(')');
       return inner;
     }
-    throw new MathSyntaxError(`Unexpected symbol: ${t.value}`);
+    if (allowUnary) return this.parseUnary();
+    return this.parsePostfix();
+  }
+
+  private attachSubscript(base: Node, sub: Node): Node {
+    if (base.kind !== 'var') throw new MathSyntaxError('Only variables can have a subscript');
+    const text = sub.kind === 'num' ? String(sub.value) : sub.kind === 'var' ? sub.name : null;
+    if (text === null) {
+      // subscript like (n+1): flatten to a readable name
+      return variable(`${base.name}_${flattenSubscript(sub)}`);
+    }
+    return variable(`${base.name}_${text}`);
+  }
+
+  private parsePostfix(): Node {
+    let node = this.parseAtom();
+    while (this.isOp('!')) {
+      this.pos++;
+      node = { kind: 'fact', arg: node };
+    }
+    if (this.isOp('%')) {
+      this.pos++;
+      node = bin('/', node, num(100));
+    }
+    return node;
+  }
+
+  private parseGroup(): Node {
+    this.expectOp('(');
+    const inner = this.parseExpr();
+    this.expectOp(')');
+    return inner;
+  }
+
+  private parseAtom(): Node {
+    const t = this.peek();
+    if (!t) throw new MathSyntaxError('The expression is incomplete');
+    this.pos++;
+
+    switch (t.type) {
+      case 'num':
+        return num(t.value);
+      case 'const':
+        return { kind: 'const', name: t.name, value: t.name === 'π' ? Math.PI : t.name === 'e' ? Math.E : Infinity };
+      case 'id':
+        return variable(t.name);
+      case 'fn':
+        return this.parseFunction(t.name);
+      case 'big':
+        return this.parseBigOperator(t.name);
+      case 'cmd':
+        return this.parseCommand(t.name);
+      case 'op': {
+        if (t.value === '(') {
+          this.pos--;
+          return this.parseGroup();
+        }
+        if (t.value === '|') {
+          this.absDepth++;
+          const inner = this.parseExpr();
+          this.absDepth--;
+          this.expectOp('|');
+          return { kind: 'call', fn: 'abs', arg: inner };
+        }
+        if (t.value === '⌊' || t.value === '⌈') {
+          const close = t.value === '⌊' ? '⌋' : '⌉';
+          const inner = this.parseExpr();
+          this.expectOp(close);
+          return { kind: 'call', fn: t.value === '⌊' ? 'floor' : 'ceil', arg: inner };
+        }
+        throw new MathSyntaxError(`Unexpected symbol: ${t.value}`);
+      }
+    }
+  }
+
+  /** sin x, sin(x), sin 2x, sin^2 x */
+  private parseFunction(fn: string): Node {
+    let exponent: Node | null = null;
+    if (this.isOp('^')) {
+      this.pos++;
+      exponent = this.parseScriptGroup();
+    }
+    let arg: Node;
+    if (this.isOp('(')) {
+      arg = this.parseGroup();
+    } else {
+      // the run of factors written right after the name: sin 2x = sin(2x)
+      arg = this.parsePower();
+      while (this.startsAtom() && this.peek()?.type !== 'fn' && this.peek()?.type !== 'big') {
+        arg = bin('*', arg, this.parsePower());
+      }
+    }
+    const call: Node = { kind: 'call', fn, arg };
+    return exponent ? bin('^', call, exponent) : call;
+  }
+
+  private parseCommand(name: 'frac' | 'sqrt' | 'root'): Node {
+    // √ written without a group: √x, √2
+    if (name === 'sqrt' && !this.isOp('(')) return { kind: 'call', fn: 'sqrt', arg: this.parsePower() };
+    this.expectOp('(');
+    const first = this.parseExpr();
+    if (name === 'sqrt') {
+      this.expectOp(')');
+      return { kind: 'call', fn: 'sqrt', arg: first };
+    }
+    this.expectOp(',');
+    const second = this.parseExpr();
+    this.expectOp(')');
+    if (name === 'root') {
+      return bin('^', second, bin('/', num(1), first));
+    }
+    return this.fractionOrDerivative(first, second);
+  }
+
+  private fractionOrDerivative(numerator: Node, denominator: Node): Node {
+    const deriv = matchDerivative(numerator, denominator);
+    if (!deriv) return bin('/', numerator, denominator);
+    if (!deriv.fn && !deriv.body && this.startsAtom()) {
+      // d/dx (x^2 + 1): the operator applies to what follows
+      return { kind: 'deriv', ...deriv, body: this.parsePower() };
+    }
+    return { kind: 'deriv', ...deriv };
+  }
+
+  private parseBigOperator(op: 'Σ' | '∏' | '∫'): Node {
+    let lower: Node | undefined;
+    let upper: Node | undefined;
+    for (let i = 0; i < 2; i++) {
+      if (this.isOp('_') && !lower) {
+        this.pos++;
+        lower = this.parseScriptLimit();
+      } else if (this.isOp('^') && !upper) {
+        this.pos++;
+        upper = this.parseScriptLimit();
+      }
+    }
+
+    if (op === '∫') {
+      this.integralDepth++;
+      const body = this.parseExprUntilDifferential();
+      this.integralDepth--;
+      const d = this.peek();
+      const v = this.peek(1);
+      if (d?.type !== 'id' || (d.name !== 'd' && d.name !== 'δ') || v?.type !== 'id') {
+        throw new MathSyntaxError('An integral must end with "dx" (or dt, dy…)');
+      }
+      this.pos += 2;
+      return { kind: 'integral', variable: v.name, from: lower, to: upper, body };
+    }
+
+    if (!lower || !upper) throw new MathSyntaxError(`${op} needs a lower and an upper limit, like Σ below i=1 and n above`);
+    if (lower.kind !== 'rel' || lower.op !== '=' || lower.left.kind !== 'var') {
+      throw new MathSyntaxError(`The lower limit of ${op} must look like i = 1`);
+    }
+    const body = this.parseTerm();
+    return { kind: 'bigop', op, index: lower.left.name, from: lower.right, to: upper, body };
+  }
+
+  /** Limit of Σ/∏/∫: i=1, n, -∞ ... as a group or a single atom. */
+  private parseScriptLimit(): Node {
+    if (this.isOp('(')) {
+      this.pos++;
+      const inner = this.parseRelation();
+      this.expectOp(')');
+      return inner;
+    }
+    return this.parseUnary();
+  }
+
+  private parseExprUntilDifferential(): Node {
+    return this.parseExpr();
   }
 }
 
-export function parseExpression(input: string): Node {
-  const parser = new Parser(tokenize(input));
+function flattenSubscript(node: Node): string {
+  switch (node.kind) {
+    case 'num':
+      return String(node.value);
+    case 'var':
+      return node.name;
+    case 'bin':
+      return `${flattenSubscript(node.left)}${node.op}${flattenSubscript(node.right)}`;
+    default:
+      return '?';
+  }
+}
+
+function factors(node: Node): Node[] {
+  if (node.kind === 'bin' && node.op === '*') return [...factors(node.left), ...factors(node.right)];
+  return [node];
+}
+
+/**
+ * d/dx, ∂/∂x, d²/dx², ∂f/∂x, ∂f(x)/∂x, ∂²f/∂x∂y ... as a (numerator, denominator) pair of expressions.
+ * `variables` is only set for mixed partial derivatives.
+ */
+function matchDerivative(
+  numerator: Node,
+  denominator: Node
+): { variable: string; variables?: string[]; partial: boolean; order: number; fn?: string; body?: Node } | null {
+  const symbolOf = (n: Node): { partial: boolean; order: number } | null => {
+    const base = n.kind === 'bin' && n.op === '^' ? n.left : n;
+    if (base.kind !== 'var' || (base.name !== 'd' && base.name !== '∂')) return null;
+    const order = n.kind === 'bin' && n.op === '^' && n.right.kind === 'num' ? n.right.value : 1;
+    return { partial: base.name === '∂', order };
+  };
+
+  const top = factors(numerator);
+  const bottom = factors(denominator);
+  const head = symbolOf(top[0]);
+  if (!head || top.length > 2) return null;
+
+  // denominator: dx, dx², ∂x∂y … (a differential symbol followed by its variable, repeated)
+  const variables: string[] = [];
+  if (bottom.length % 2 !== 0) return null;
+  for (let i = 0; i < bottom.length; i += 2) {
+    const symbol = symbolOf(bottom[i]);
+    if (!symbol || symbol.partial !== head.partial) return null;
+    const v = bottom[i + 1];
+    const base = v.kind === 'bin' && v.op === '^' ? v.left : v;
+    if (base.kind !== 'var') return null;
+    const times = v.kind === 'bin' && v.op === '^' && v.right.kind === 'num' ? v.right.value : 1;
+    for (let k = 0; k < times; k++) variables.push(base.name);
+  }
+  if (variables.length === 0 || variables.length !== head.order) return null;
+
+  let fn: string | undefined;
+  let body: Node | undefined;
+  if (top.length === 2) {
+    if (top[1].kind === 'var') fn = top[1].name;
+    else if (top[1].kind === 'call') body = top[1];
+    else return null;
+  }
+  const mixed = variables.some((v) => v !== variables[0]);
+  return { variable: variables[0], variables: mixed ? variables : undefined, partial: head.partial, order: head.order, fn, body };
+}
+
+export function parseRelation(input: string, userFunctions?: ReadonlySet<string>): Node {
+  const parser = new Parser(tokenize(input, userFunctions));
+  const node = parser.parseRelation();
+  if (!parser.atEnd()) throw new MathSyntaxError('Unexpected symbols at the end of the expression');
+  return node;
+}
+
+export function parseExpression(input: string, userFunctions?: ReadonlySet<string>): Node {
+  const parser = new Parser(tokenize(input, userFunctions));
   const node = parser.parseExpr();
   if (!parser.atEnd()) throw new MathSyntaxError('Unexpected symbols at the end of the expression');
   return node;
 }
 
-export function evaluate(node: Node, x = 0): number {
-  switch (node.kind) {
-    case 'num':
-      return node.value;
-    case 'var':
-      return x;
-    case 'neg':
-      return -evaluate(node.arg, x);
-    case 'bin': {
-      const a = evaluate(node.left, x);
-      const b = evaluate(node.right, x);
-      switch (node.op) {
-        case '+':
-          return a + b;
-        case '-':
-          return a - b;
-        case '*':
-          return a * b;
-        case '/':
-          if (b === 0) throw new MathSyntaxError('Division by zero');
-          return a / b;
-        case '^':
-          return Math.pow(a, b);
-      }
-    }
-  }
-}
-
-export function containsVariable(node: Node): boolean {
-  if (node.kind === 'var') return true;
-  if (node.kind === 'neg') return containsVariable(node.arg);
-  if (node.kind === 'bin') return containsVariable(node.left) || containsVariable(node.right);
-  return false;
-}
-
 /** Compile an expression in x into a plain function, for plotting. */
 export function compileFunction(input: string): (x: number) => number {
   const ast = parseExpression(input);
-  return (x: number) => evaluate(ast, x);
-}
-
-const PRECEDENCE = { '+': 1, '-': 1, '*': 2, '/': 2, '^': 4 } as const;
-
-function precedence(node: Node): number {
-  if (node.kind === 'bin') return PRECEDENCE[node.op];
-  if (node.kind === 'neg' || (node.kind === 'num' && node.value < 0)) return 3;
-  return 5;
-}
-
-export function formatNumber(value: number): string {
-  if (!Number.isFinite(value)) return Number.isNaN(value) ? 'undefined' : value > 0 ? '∞' : '-∞';
-  const rounded = Math.round(value * 1e10) / 1e10;
-  return String(Object.is(rounded, -0) ? 0 : rounded);
-}
-
-export function toText(node: Node): string {
-  switch (node.kind) {
-    case 'num':
-      return formatNumber(node.value);
-    case 'var':
-      return 'x';
-    case 'neg': {
-      const inner = toText(node.arg);
-      return precedence(node.arg) < 3 ? `-(${inner})` : `-${inner}`;
-    }
-    case 'bin': {
-      const p = PRECEDENCE[node.op];
-      // '^' is right-associative, the rest left-associative
-      const leftNeedsParens = node.op === '^' ? precedence(node.left) <= p : precedence(node.left) < p;
-      const rightNeedsParens =
-        precedence(node.right) < p ||
-        precedence(node.right) === 3 || // negative operand: 1 - (-1), 2 · (-3)
-        (precedence(node.right) === p && (node.op === '-' || node.op === '/'));
-      const l = leftNeedsParens ? `(${toText(node.left)})` : toText(node.left);
-      const r = rightNeedsParens ? `(${toText(node.right)})` : toText(node.right);
-      const opText = node.op === '*' ? ' · ' : node.op === '^' ? '^' : ` ${node.op} `;
-      return `${l}${opText}${r}`;
-    }
-  }
-}
-
-export function toLatex(node: Node): string {
-  switch (node.kind) {
-    case 'num':
-      return formatNumber(node.value);
-    case 'var':
-      return 'x';
-    case 'neg':
-      return precedence(node.arg) < 3 ? `-\\left(${toLatex(node.arg)}\\right)` : `-${toLatex(node.arg)}`;
-    case 'bin': {
-      if (node.op === '/') return `\\frac{${toLatex(node.left)}}{${toLatex(node.right)}}`;
-      const p = PRECEDENCE[node.op];
-      const wrap = (child: Node, needs: boolean) => (needs ? `\\left(${toLatex(child)}\\right)` : toLatex(child));
-      if (node.op === '^') {
-        return `${wrap(node.left, precedence(node.left) <= p)}^{${toLatex(node.right)}}`;
-      }
-      const l = wrap(node.left, precedence(node.left) < p);
-      const r = wrap(node.right, precedence(node.right) < p || (node.op === '-' && precedence(node.right) === p));
-      // Write 2x instead of 2 · x
-      const implicit = node.op === '*' && node.left.kind === 'num' && !r.startsWith('\\left') && !/^[0-9]/.test(r);
-      const opTex = implicit ? '' : node.op === '*' ? ' \\cdot ' : ` ${node.op} `;
-      return `${l}${opTex}${r}`;
-    }
-  }
-}
-
-/**
- * Replace the first (left-most, deepest) operation whose operands are both numbers by its value.
- * Calling it repeatedly shows how an expression is simplified one operation at a time.
- */
-function reduceOnce(node: Node): { node: Node; changed: boolean } {
-  if (node.kind === 'num' || node.kind === 'var') return { node, changed: false };
-  if (node.kind === 'neg') {
-    if (node.arg.kind === 'num') return { node: { kind: 'num', value: -node.arg.value }, changed: true };
-    const r = reduceOnce(node.arg);
-    return { node: { kind: 'neg', arg: r.node }, changed: r.changed };
-  }
-  const l = reduceOnce(node.left);
-  if (l.changed) return { node: { ...node, left: l.node }, changed: true };
-  const r = reduceOnce(node.right);
-  if (r.changed) return { node: { ...node, right: r.node }, changed: true };
-  if (node.left.kind === 'num' && node.right.kind === 'num') {
-    return { node: { kind: 'num', value: evaluate(node) }, changed: true };
-  }
-  return { node, changed: false };
-}
-
-export function simplificationSteps(node: Node, maxSteps = 12): string[] {
-  const steps = [toText(node)];
-  let current = node;
-  for (let i = 0; i < 100; i++) {
-    const r = reduceOnce(current);
-    if (!r.changed) break;
-    current = r.node;
-    steps.push(toText(current));
-  }
-  if (steps.length > maxSteps) {
-    return [...steps.slice(0, 2), '…', ...steps.slice(-(maxSteps - 3))];
-  }
-  return steps;
-}
-
-export interface SolveResult {
-  kind: 'evaluation' | 'equation' | 'function' | 'error';
-  input: string;
-  latex: string;
-  readableText: string;
-  answer?: string; // short text to write after '='
-  solution?: string;
-  steps: string[];
-  graphExpr?: string; // expression in x that can be plotted
-  error?: string;
-}
-
-/**
- * Interpret a recognized line of math:
- *   "12+7="      -> evaluate, answer "19"
- *   "2x+3=11"    -> solve the equation (linear or quadratic)
- *   "x^2-4"      -> a function of x that can be plotted
- *   "3x4="       -> ends with '=' and has nothing to solve, so 'x' means multiplication
- */
-export function solve(rawInput: string): SolveResult {
-  const input = rawInput.replace(/\s+/g, '');
-  const base: SolveResult = { kind: 'error', input, latex: input, readableText: input, steps: [] };
-  try {
-    const eqCount = (input.match(/=/g) || []).length;
-    if (eqCount > 1) throw new MathSyntaxError('More than one "=" sign');
-
-    if (eqCount === 0 || input.endsWith('=')) {
-      let exprText = input.replace(/=$/, '');
-      let ast = parseExpression(exprText);
-
-      if (containsVariable(ast) && input.endsWith('=')) {
-        // "3x4=" : nothing to solve for, so read 'x' as a multiplication sign
-        exprText = exprText.replace(/x/gi, '*');
-        ast = parseExpression(exprText);
-      }
-
-      if (containsVariable(ast)) {
-        return {
-          ...base,
-          kind: 'function',
-          latex: `y = ${toLatex(ast)}`,
-          readableText: `y = ${toText(ast)}`,
-          steps: [`Function of x: y = ${toText(ast)}`, 'It can be plotted as a graph.'],
-          graphExpr: toText(ast).replace(/ · /g, '*').replace(/\s/g, ''),
-        };
-      }
-
-      const value = evaluate(ast);
-      const answer = formatNumber(value);
-      return {
-        ...base,
-        kind: 'evaluation',
-        latex: `${toLatex(ast)} = ${answer}`,
-        readableText: `${toText(ast)} = ${answer}`,
-        answer,
-        solution: answer,
-        steps: simplificationSteps(ast),
-      };
-    }
-
-    const [lhsText, rhsText] = input.split('=');
-    const lhs = parseExpression(lhsText);
-    const rhs = parseExpression(rhsText);
-    const latex = `${toLatex(lhs)} = ${toLatex(rhs)}`;
-    const readable = `${toText(lhs)} = ${toText(rhs)}`;
-
-    if (!containsVariable(lhs) && !containsVariable(rhs)) {
-      const a = evaluate(lhs);
-      const b = evaluate(rhs);
-      const ok = Math.abs(a - b) < 1e-9;
-      return {
-        ...base,
-        kind: 'evaluation',
-        latex,
-        readableText: readable,
-        answer: ok ? '✓' : '✗',
-        solution: ok ? 'The equality holds' : `False: ${formatNumber(a)} ≠ ${formatNumber(b)}`,
-        steps: [...simplificationSteps(lhs), '=', ...simplificationSteps(rhs)],
-      };
-    }
-
-    return { ...base, kind: 'equation', latex, readableText: readable, ...solvePolynomial(lhs, rhs) };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { ...base, error: message, steps: [message] };
-  }
-}
-
-/**
- * Solve f(x) = g(x) when h(x) = f(x) - g(x) is a polynomial of degree <= 2.
- * The coefficients are found by sampling h at x = -1, 0, 1 and verified at other points.
- */
-function solvePolynomial(lhs: Node, rhs: Node): Pick<SolveResult, 'answer' | 'solution' | 'steps'> {
-  const h = (x: number) => evaluate(lhs, x) - evaluate(rhs, x);
-  const hm1 = h(-1);
-  const h0 = h(0);
-  const h1 = h(1);
-  const a = (h1 + hm1) / 2 - h0;
-  const b = (h1 - hm1) / 2;
-  const c = h0;
-  const isPoly = [2, 3, -2.5, 7].every((x) => Math.abs(a * x * x + b * x + c - h(x)) < 1e-6 * (1 + Math.abs(h(x))));
-  if (!isPoly) {
-    throw new MathSyntaxError('Only linear and quadratic equations can be solved');
-  }
-
-  const steps = [`Move everything to one side: ${polyText(a, b, c)} = 0`];
-  const eps = 1e-12;
-
-  if (Math.abs(a) < eps) {
-    if (Math.abs(b) < eps) {
-      const always = Math.abs(c) < eps;
-      steps.push(always ? 'True for every x' : 'No solution');
-      return { answer: always ? 'x ∈ ℝ' : '∅', solution: always ? 'Infinitely many solutions' : 'No solution', steps };
-    }
-    const x = -c / b;
-    steps.push(`Linear equation: ${formatNumber(b)}·x = ${formatNumber(-c)}`);
-    steps.push(`x = ${formatNumber(-c)} / ${formatNumber(b)} = ${formatNumber(x)}`);
-    return { answer: `x = ${formatNumber(x)}`, solution: `x = ${formatNumber(x)}`, steps };
-  }
-
-  const disc = b * b - 4 * a * c;
-  steps.push(`Quadratic equation: a = ${formatNumber(a)}, b = ${formatNumber(b)}, c = ${formatNumber(c)}`);
-  steps.push(`Discriminant: b² - 4ac = ${formatNumber(disc)}`);
-  if (disc < -eps) {
-    steps.push('The discriminant is negative: no real solutions');
-    return { answer: 'no real solution', solution: 'No real solutions', steps };
-  }
-  if (Math.abs(disc) <= eps) {
-    const x = -b / (2 * a);
-    steps.push(`Double root: x = -b / 2a = ${formatNumber(x)}`);
-    return { answer: `x = ${formatNumber(x)}`, solution: `x = ${formatNumber(x)}`, steps };
-  }
-  const sq = Math.sqrt(disc);
-  const x1 = (-b - sq) / (2 * a);
-  const x2 = (-b + sq) / (2 * a);
-  const [lo, hi] = x1 < x2 ? [x1, x2] : [x2, x1];
-  steps.push(`x = (-b ± √disc) / 2a → x₁ = ${formatNumber(lo)}, x₂ = ${formatNumber(hi)}`);
-  const text = `x = ${formatNumber(lo)}, x = ${formatNumber(hi)}`;
-  return { answer: text, solution: text, steps };
-}
-
-function polyText(a: number, b: number, c: number): string {
-  const parts: string[] = [];
-  const add = (coef: number, suffix: string) => {
-    if (Math.abs(coef) < 1e-12) return;
-    const sign = coef < 0 ? '-' : '+';
-    const abs = Math.abs(coef);
-    const num = suffix && Math.abs(abs - 1) < 1e-12 ? '' : formatNumber(abs);
-    parts.push(parts.length === 0 ? `${coef < 0 ? '-' : ''}${num}${suffix}` : ` ${sign} ${num}${suffix}`);
-  };
-  add(a, 'x²');
-  add(b, 'x');
-  add(c, '');
-  return parts.length ? parts.join('') : '0';
+  return (x: number) => evaluate(ast, { x });
 }

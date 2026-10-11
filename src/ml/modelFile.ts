@@ -34,7 +34,7 @@ export function fromModelFile(file: ModelFile): LoadedModel {
   return { name: file.name, classes: file.classes, network, meta: file.meta };
 }
 
-export type BuiltinModel = 'digits' | 'letters' | 'symbols';
+export type BuiltinModel = 'digits' | 'letters' | 'math';
 
 const cache = new Map<BuiltinModel, Promise<LoadedModel>>();
 

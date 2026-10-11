@@ -218,7 +218,7 @@ export const AlphanumericStudio: React.FC = () => {
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-200">
         <div>
           <h1 className="text-xl font-bold text-slate-900 tracking-tight">
-            Stage 2: Alphanumeric Studio (0–9, A–Z)
+            Alphanumeric Studio (0–9, A–Z)
           </h1>
           <p className="text-xs text-slate-500 mt-1 max-w-2xl">
             Expand beyond digits to letters. Characters are segmented, then classified by a neural network
@@ -514,7 +514,7 @@ export const AlphanumericStudio: React.FC = () => {
         </div>
       </div>
 
-      <LettersTrainer onModelTrained={setModel} />
+      <LettersTrainer model={model} onModelTrained={setModel} inputPixels={segmentedChars.find((c) => c.id === selectedCharId)?.nnPixels ?? segmentedChars[0]?.nnPixels ?? null} />
     </div>
   );
 };

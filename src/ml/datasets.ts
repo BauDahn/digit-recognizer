@@ -73,7 +73,14 @@ export async function fetchDataset(url: string): Promise<RawDataset> {
   return decodeDataset(bytes);
 }
 
-export type DatasetName = 'mnist-train' | 'mnist-test' | 'emnist-balanced-train' | 'emnist-balanced-test';
+export type DatasetName =
+  | 'mnist-train'
+  | 'mnist-test'
+  | 'emnist-balanced-train'
+  | 'emnist-balanced-test'
+  | 'symbols-train'
+  | 'symbols-test'
+  | 'symbols-replay';
 
 /** URL of a dataset file in public/datasets, respecting Vite's base path. */
 export function datasetUrl(name: DatasetName): string {

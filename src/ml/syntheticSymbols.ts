@@ -5,7 +5,7 @@ import { rasterizeStrokes28, StrokePoint } from './imageOps';
  * exactly like the math canvas does. MNIST has no operators, so these fill the gap.
  */
 
-export type OperatorSymbol = '+' | '-' | '/' | '=' | '(' | ')' | 'x';
+export type OperatorSymbol = '+' | '-' | '/' | '=' | '(' | ')' | 'x' | '!' | '<' | '>';
 
 type Rand = () => number;
 
@@ -82,6 +82,28 @@ export function generateOperatorStrokes(symbol: OperatorSymbol, r: Rand = Math.r
     case ')': {
       const span = between(r, 0.9, 1.25);
       strokes = [arc(r, -0.35, 0, between(r, 0.25, 0.45), 0.5, -span, span)];
+      break;
+    }
+    case '<':
+    case '>': {
+      // One stroke: '<' has its tip on the left, '>' on the right
+      const w = between(r, 0.2, 0.4);
+      const h = between(r, 0.3, 0.5);
+      const sign = symbol === '<' ? 1 : -1;
+      const tipX = sign * -w;
+      strokes = [
+        [...wobblyLine(r, sign * w, -h, tipX, 0, 0.02), ...wobblyLine(r, tipX, 0, sign * w, h, 0.02).slice(1)],
+      ];
+      break;
+    }
+    case '!': {
+      // A vertical bar that narrows a little towards the bottom, and a dot under it
+      const top = -0.5;
+      const bottom = between(r, 0.1, 0.25);
+      const x = between(r, -0.04, 0.04);
+      const dotY = bottom + between(r, 0.2, 0.32);
+      const dot = arc(r, x, dotY, 0.04, 0.04, 0, Math.PI * 2);
+      strokes = [wobblyLine(r, x + between(r, -0.04, 0.04), top, x, bottom, 0.02), dot];
       break;
     }
     case 'x': {

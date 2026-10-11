@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useState, useMemo } from 'react';
 import { X, ZoomIn, ZoomOut, Move } from 'lucide-react';
-import { compileFunction } from '../../ml/mathParser';
+import { compileFunction } from '../ml/mathParser';
 
 interface FunctionGraphCardProps {
   id: string;

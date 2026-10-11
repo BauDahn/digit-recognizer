@@ -1,63 +1,118 @@
 # NeuroScribe
 
-An educational handwriting-recognition studio. A small neural network (a multi-layer perceptron), written from scratch in TypeScript, is trained on real **MNIST** images and runs **entirely in your browser**. No cloud APIs, no ML libraries: you can read every line of the forward pass and of backpropagation in [`src/ml/neuralNetwork.ts`](src/ml/neuralNetwork.ts).
+Handwritten math on an infinite page, and a lab to look inside the neural networks that read it. The networks are multi-layer perceptrons written from scratch in TypeScript ([`src/ml/neuralNetwork.ts`](src/ml/neuralNetwork.ts)); everything runs **in your browser**, no cloud APIs and no ML libraries.
 
-## The three modes
+## About this project
 
-| Mode | What it shows |
-|---|---|
-| **01. Digit Lab** | Train a 784-64-32-10 network on 8,000 MNIST digits in a Web Worker and watch the learning curves, the confusion matrix, the first-layer weights and the activation of every neuron for what you draw. Load the pre-trained model (97.9% on the full MNIST test set), export or import weights, or teach the model your own handwriting. |
-| **02. Alphanumeric Studio** | Several characters at once: segmentation into separate characters, a 784-128-64-47 network trained on **EMNIST Balanced** (digits and letters), and side by side, a classifier made of hand-written rules (loops, symmetry, aspect ratio) so you can compare both approaches. You can also train the letters network from scratch in the browser. |
-| **03. Infinite Math Canvas** | Write math by hand: `24+16=`, `2x+3=11`, `x²-4`. Each symbol is cut out, turned into a 28×28 MNIST-style image and classified by a network trained on MNIST digits + synthetic operators. A small parser (no `eval`) evaluates the expression step by step, solves linear and quadratic equations, writes the answer after the `=` and plots functions of x. |
+NeuroScribe is a personal project I built to learn how neural networks and a handwriting-to-math pipeline work end to end, from the raw pixels to a solved equation.
+
+> **Status: work in progress.** The project is live and usable, but it is still in development and there is a lot left to polish (recognition accuracy on some symbols, the layout analysis on messy handwriting, the solver's coverage and the UI). Expect rough edges.
+>
+> **Live demo:** https://baudahn.github.io/digit-recognizer/ · **Lab:** https://baudahn.github.io/digit-recognizer/lab.html
+
+**It was built mostly with AI.** Nearly all of the code was written by [Claude Code](https://claude.com/claude-code) (Anthropic's coding agent) working from my instructions. I did not hand-write most of it, and I would rather say so up front than leave you guessing. My part was the work around the code:
+
+- **Defining the product**: what it should do, what "done" looks like, and which features are worth building (a canvas that reads layout, a lab to look inside the networks, learning from user corrections).
+- **Setting constraints and direction**: 100% local, no cloud APIs, no ML libraries, networks written from scratch, and a clean separation between the app and the lab.
+- **Reviewing and steering**: reading the output, running it, catching wrong turns, and asking for rework. The history shows this as incremental commits and a restructure of the codebase, not a one-shot dump.
+- **Verification**: unit tests (Vitest), strict type checking and CI, so the code is checked by something other than the model that wrote it.
+
+What I took away from it is how to direct an AI agent on a project of non-trivial size, and how to read and verify machine-written code, as well as the ML and math topics themselves.
+
+### Highlights
+
+- A **multi-layer perceptron written from scratch** in TypeScript (forward pass, backpropagation, momentum SGD), with no ML libraries.
+- **Training that runs in the browser** (Web Workers) and **offline in Node** with the same code, data-parallel over CPU cores.
+- A **handwriting pipeline**: stroke grouping, symbol recognition, 2D layout analysis (fractions, roots, sums, integrals, exponents), a parser written by hand (no `eval`), and a symbolic solver/differentiator/integrator.
+- **On-device learning**: user corrections fine-tune the network, mixed with a replay of the original data to avoid forgetting, and are stored in IndexedDB.
+- A **lab for inspecting networks**: weights, activations, learning curves, confusion matrix and per-class metrics.
+- **Stack**: TypeScript, React 19, Vite, Tailwind CSS, KaTeX, Vitest, GitHub Actions.
+
+## What it does
+
+There are two separate pages:
+
+| Page | For | What it is |
+|---|---|---|
+| **`/` the app** | people who want to write math | An infinite canvas. Write numbers, letters, Greek, `Σ`, `∏`, `∫`, `∂`, fractions, roots, exponents and indices; it reads them, typesets them as LaTeX and solves what can be solved. If it reads a symbol wrong you tell it what it was and the network **learns from the correction** for next time. |
+| **`/lab.html` the lab** | looking inside the networks | The **Digit Neural Lab** and the **Alphanumeric Lab**: draw, train, and see the network as a graph, its parameters, how the weights move while it learns, and per-class metrics. |
+
+## The app
+
+- **Reads 160+ symbols**: digits, Latin letters, Greek, calculus (`∂ ∇ ∫ ∮ Σ ∏ ∞ √ Δ`), operators, relations, sets and logic, arrows, brackets (`Ctrl+K` lists them).
+- **Reads the layout, not just the symbols**: fractions (a bar with something above and below), roots, sums and products with limits above and below, integrals with limits, exponents and indices. Several lines written one under the other are read separately.
+- **Typesets and solves**: LaTeX of everything it reads; arithmetic, linear and quadratic equations, sums and products with numeric limits (`Σ i² = 14`, with the terms written out), polynomial integrals (definite ones numerically otherwise), symbolic derivatives (`d/dx`, `∂/∂y`), functions of one variable are plotted. What it cannot compute it still typesets.
+- **Definitions across lines**: write `swish(x) = xσ(βx)`, then `y = swish(x)`, then `∂y/∂x =` and the third line is differentiated using the first two, in any order on the page. `σ(…)` is the sigmoid (also built in: `tanh`, `sinh`, `cosh`, `softplus`, `swish`). Partial, mixed (`∂²f/∂x∂y`) and higher-order derivatives treat the other letters as constants, and the steps name the rules used (product, quotient, chain, σ′ = σ(1−σ)).
+- **Symbolic integrals**: sums and constant multiples, powers, `1/(ax+b)`, `1/(1+x²)`, `eˣ`, `sin`, `cos`, `ln`, `σ`, `tanh`…, polynomial × `eˣ`/`sin`/`cos` by parts, and `f(g(x))·g′(x)` by substitution. When there is no elementary form and the limits are numbers, it integrates numerically.
+- **Teach it**: after recognizing, click any symbol (on the page or in the panel) and say what it really was. The correction becomes a training example; the network is fine-tuned in a Web Worker together with a replay of its original training data (so it does not forget the rest) and saved in IndexedDB. "Forget what it learned from me" goes back to the shipped model.
+- **Keyboard**: `Ctrl+Z` undo, `Ctrl+Shift+Z` / `Ctrl+Y` redo, `Enter` or `Ctrl+Enter` recognize, `P M E L H` tools, `1 2 3` pen width, `Space` to pan, `Ctrl+A`, `Delete`, `Ctrl +/-/0` zoom, `Ctrl+S` save as image, `?` for the full list. The page is saved in the browser.
 
 ## Getting started
 
 ```bash
 npm install
-npm run dev        # http://localhost:5173
+npm run dev        # http://localhost:5173  (app)  and  http://localhost:5173/lab.html  (lab)
 ```
-
-Other scripts:
 
 ```bash
 npm test           # unit tests (Vitest)
 npm run lint       # type checking
-npm run build      # production build in dist/
+npm run build      # production build in dist/ (both pages)
 
-npm run build:datasets   # re-create public/datasets/*.bin.gz from MNIST / EMNIST
-npm run train:models     # re-train public/models/*.json (digits, symbols, letters)
+npm run build:datasets   # public/datasets/mnist-*, emnist-* (lab)
+npm run build:symbols    # the dataset of the math network: .cache/symbols and public/datasets/symbols-*
+npm run train:models     # re-train the digit and letter models
+npm run train:models math   # re-train the math model (parallel, ~1 hour on 14 cores)
 ```
 
-The two last scripts download the original datasets into `.cache/datasets/` (MNIST ≈ 11 MB, EMNIST ≈ 560 MB; EMNIST needs the `unzip` command). The results are committed, so you only need them to change the datasets or retrain.
+The dataset scripts download MNIST (≈ 11 MB), EMNIST (≈ 560 MB, needs `unzip`) and, for the math network, [HASYv2](https://zenodo.org/records/259444) (≈ 34 MB, see the top of `scripts/build-symbols.ts`) into `.cache/` (git-ignored). The results are committed, so you only need them to change the data or retrain.
 
-## How it works
+## The math network
+
+`public/models/math.json`: **784-512-256-163**, Leaky ReLU, softmax, trained with momentum SGD (data-parallel over CPU cores, see `scripts/lib/parallelTrainer.ts`) on about 200,000 images:
+
+| Source | Used for |
+|---|---|
+| MNIST | digits |
+| EMNIST ByClass | upper and lower case letters (look-alike pairs such as c/C, x/X are one class) |
+| HASYv2 (Thiemann, 168k handwritten symbols) | Greek, calculus, relations, sets, arrows, brackets… |
+| Generated strokes (`src/ml/syntheticSymbols.ts`) | `= ( ) ! < > + - /`, which HASY lacks or has too few of |
+
+Everything is normalized like MNIST (`src/ml/imageOps.ts`): the ink is cropped, scaled into a 20×20 box and centered by center of mass in 28×28. Flat shapes (`-`, `=`, dots) lose their size that way, so they are told apart by geometry before the network sees them. The accuracy on the held-out test split is in the model file (`meta.testAccuracy`) and shown in the lab.
+
+## How a line is read
 
 ```
-drawing ──► 28×28 image ──► neural network ──► probabilities ──► answer
+strokes ─► symbols ─► layout ─► text for the parser ─► tree ─► answer
+  group     28×28      frac/√/Σ     "Σ_(i=1)^(4)i^(2)"    evaluate / solve /
+  strokes   network    ^ _ limits                         differentiate / integrate
+                          └──────► LaTeX (what is shown)
 ```
 
-1. **Preprocessing** (`src/ml/imageOps.ts`): exactly what was done to build MNIST. The ink is cropped, scaled to fit a 20×20 box keeping its proportions, and placed in a 28×28 image so that its center of mass is in the middle. Strokes from the canvas are rasterized with a fixed pen width so a symbol looks the same whether you wrote it small or large.
-2. **The network** (`src/ml/neuralNetwork.ts`): two hidden layers with Leaky ReLU, a softmax output, cross-entropy loss and mini-batch SGD with momentum. Weights start with He initialization.
-3. **Training** (`src/ml/trainer.worker.ts`): runs in a Web Worker so the page keeps responding. With *data augmentation* on, half of the images are randomly rotated, scaled, shifted or made bolder every epoch.
-4. **Datasets** (`src/ml/datasets.ts`): compact gzip-compressed binary files in `public/datasets/`, decompressed in the browser with `DecompressionStream`.
-5. **Math** (`src/ml/strokeRecognizer.ts`, `src/ml/mathParser.ts`): strokes that overlap horizontally form one symbol (`=`, `+`, `4`…), tiny marks are dots, raised and smaller symbols are exponents. The resulting text is parsed into a syntax tree that is evaluated, simplified one operation at a time or solved.
+1. **Grouping** (`src/ml/strokeRecognizer.ts`): strokes that touch or cross belong together; the bars of `=`, the dot of `i` and `÷` are special cases.
+2. **Layout** (`src/ml/mathLayout.ts`): fraction bars, radicals, big operators with limits and exponents/indices are found from the bounding boxes alone, so correcting one symbol just re-runs the layout.
+3. **Math** (`src/ml/mathParser.ts`, `mathAst.ts`, `mathSolver.ts`, `mathCalculus.ts`): a tokenizer and recursive-descent parser (no `eval`), evaluation, step-by-step simplification, equation solving and symbolic calculus.
+4. **Learning** (`src/ml/userModel.ts`, `mathModel.ts`, `learner.worker.ts`): fine-tuning from corrections.
 
-## Pre-trained models
+## The lab
 
-| File | Architecture | Trained on | Test accuracy |
-|---|---|---|---|
-| `public/models/digits.json` | 784-64-32-10 | MNIST (60,000 images) | 97.9% |
-| `public/models/symbols.json` | 784-128-64-17 | MNIST + synthetic `+ - / = ( )` + `x` from EMNIST | 97.5% |
-| `public/models/letters.json` | 784-128-64-47 | EMNIST Balanced | 81.9% |
+Open `/lab.html`. Both labs share these views of the network:
 
-Models trained in the browser are saved in `localStorage` and can be exported as JSON in the same format.
+- **The network**: input image, both hidden layers and the outputs as a graph. Circles are shaded by how much each neuron fires for what you drew; the squares are what each first-layer neuron looks for; connections are blue (excite) or red (inhibit). "What changed" highlights the connections that moved most in the last update, live while it trains. Click a neuron to follow its connections.
+- **Parameters**: parameter count and size per layer, mean, standard deviation, range, norm, share of near-zero weights, histogram of the weights, and the hyperparameters.
+- **How the weights move**: mean |Δw| per layer at each update.
+- **Metrics**: accuracy, macro and weighted F1, precision/recall/F1 per class and the most frequent mistakes.
+
+The Digit Neural Lab also has the learning curves, confusion matrix, the activation of every neuron, the first-layer filters, a gallery of MNIST digits and data augmentation. The Alphanumeric Lab segments several characters, classifies them with a network trained on EMNIST Balanced and, for comparison, with hand-written rules.
 
 ## Project structure
 
 ```
 src/
-  ml/            neural network, preprocessing, datasets, math parser (no React, unit-tested)
-  components/    one folder per mode
-scripts/         dataset builder and offline training (Node, same code as the browser)
-public/          datasets and pre-trained models served as static files
+  app/        the handwriting app (canvas, recognition panel, corrections, shortcuts)
+  lab/        the lab (digit lab, alphanumeric lab, shared insight views)
+  ml/         networks, preprocessing, layout, math engine, learning: no React, unit-tested
+scripts/      dataset builders and offline training (Node, same code as the browser)
+public/       datasets and pre-trained models served as static files
+index.html    the app          lab.html    the lab
 ```

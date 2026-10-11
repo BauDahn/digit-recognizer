@@ -1,4 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { LabInsights } from '../insights/LabInsights';
+import { useWeightTracker } from '../insights/useWeightTracker';
 import { Play, Square, RotateCcw } from 'lucide-react';
 import { EMNIST_BALANCED_CLASSES } from '../../ml/classes';
 import { datasetUrl, fetchDataset, toTrainingSamples } from '../../ml/datasets';
@@ -6,20 +8,53 @@ import { LoadedModel, removeModelFromStorage, saveModelToStorage, toModelFile, l
 import { NeuralNetwork } from '../../ml/neuralNetwork';
 import { createTrainerWorker, packSamples, setWeights, TrainRequest, WorkerMessage } from '../../ml/trainingClient';
 import { TrainingEpochMetric } from '../../types';
-import { TrainingCharts } from '../DigitLab/TrainingCharts';
+import { TrainingCharts } from '../digit/TrainingCharts';
 
 /**
  * Train a letters + digits network from scratch on EMNIST Balanced, in a Web Worker.
  * The browser subset has 14,100 training images (300 per class) and 2,820 test images.
  */
-export const LettersTrainer: React.FC<{ onModelTrained: (model: LoadedModel) => void }> = ({ onModelTrained }) => {
+interface LettersTrainerProps {
+  /** The model being shown (pre-trained or trained here) */
+  model: LoadedModel | null;
+  onModelTrained: (model: LoadedModel) => void;
+  /** The 28x28 image the network is looking at, for the diagram */
+  inputPixels?: Float32Array | null;
+}
+
+const PLACEHOLDER = new NeuralNetwork({ hiddenSize1: 128, hiddenSize2: 64, outputSize: EMNIST_BALANCED_CLASSES.length });
+
+export const LettersTrainer: React.FC<LettersTrainerProps> = ({ model, onModelTrained, inputPixels = null }) => {
   const [epochs, setEpochs] = useState(8);
+  const [confusion, setConfusion] = useState<number[][]>([]);
+  const tracker = useWeightTracker(model?.network ?? PLACEHOLDER);
+  const testSet = useRef<ReturnType<typeof toTrainingSamples> | null>(null);
   const [status, setStatus] = useState<'idle' | 'loading' | 'training'>('idle');
   const [metrics, setMetrics] = useState<TrainingEpochMetric[]>([]);
   const [error, setError] = useState<string | null>(null);
   const workerRef = useRef<Worker | null>(null);
 
   useEffect(() => () => workerRef.current?.terminate(), []);
+
+  // A different network (pre-trained, restored or freshly started): new baseline, and its metrics
+  useEffect(() => {
+    if (!model) return;
+    tracker.reset();
+    if (status !== 'idle') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        if (!testSet.current) testSet.current = toTrainingSamples(await fetchDataset(datasetUrl('emnist-balanced-test')), 'emnist-test');
+        if (!cancelled) setConfusion(model.network.evaluate(testSet.current).confusionMatrix);
+      } catch {
+        // metrics stay empty
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model?.network]);
 
   const start = async () => {
     setError(null);
@@ -31,14 +66,21 @@ export const LettersTrainer: React.FC<{ onModelTrained: (model: LoadedModel) => 
         fetchDataset(datasetUrl('emnist-balanced-test')),
       ]);
       const network = new NeuralNetwork({ hiddenSize1: 128, hiddenSize2: 64, outputSize: EMNIST_BALANCED_CLASSES.length });
+      testSet.current = toTrainingSamples(test, 'emnist-test');
+      onModelTrained({ name: 'letters', classes: EMNIST_BALANCED_CLASSES, network, meta: { trainedOn: 'untrained' } });
       const worker = createTrainerWorker();
       workerRef.current = worker;
       setStatus('training');
 
       worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
         const msg = event.data;
-        if (msg.type === 'epoch') {
+        if (msg.type === 'progress') {
           setWeights(network, msg.weights);
+          tracker.recordUpdate(msg.epoch - 1 + msg.fraction);
+        } else if (msg.type === 'epoch') {
+          setWeights(network, msg.weights);
+          setConfusion(msg.confusionMatrix);
+          tracker.recordUpdate(msg.epoch);
           setMetrics((prev) => [
             ...prev,
             { epoch: msg.epoch, loss: msg.loss, accuracy: msg.testAccuracy, trainAccuracy: msg.trainAccuracy, seconds: msg.seconds },
@@ -67,6 +109,7 @@ export const LettersTrainer: React.FC<{ onModelTrained: (model: LoadedModel) => 
         test: packSamples(toTrainingSamples(test, 'emnist-test')),
         epochs,
         augmentProbability: 0.3,
+        updatesPerEpoch: 4,
       };
       worker.postMessage(request);
     } catch (e: any) {
@@ -91,6 +134,7 @@ export const LettersTrainer: React.FC<{ onModelTrained: (model: LoadedModel) => 
   const last = metrics[metrics.length - 1];
 
   return (
+    <div className="space-y-6">
     <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs grid grid-cols-1 lg:grid-cols-12 gap-6">
       <div className="lg:col-span-5 space-y-3">
         <div>
@@ -156,6 +200,18 @@ export const LettersTrainer: React.FC<{ onModelTrained: (model: LoadedModel) => 
           </div>
         )}
       </div>
+    </div>
+    {model && (
+      <LabInsights
+        network={model.network}
+        classes={model.classes}
+        pixels={inputPixels}
+        tracker={tracker}
+        confusion={confusion}
+        training={status === 'training'}
+        hyper={{ learningRate: model.network.config.learningRate, momentum: model.network.config.momentum, batchSize: model.network.config.batchSize, epochs, augmentation: true }}
+      />
+    )}
     </div>
   );
 };

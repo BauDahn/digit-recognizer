@@ -26,6 +26,8 @@ export interface TrainRequest {
   test: PackedSamples;
   epochs: number;
   augmentProbability: number; // 0 = no data augmentation
+  /** How many times per epoch the worker sends the current weights (default 1: only at the end) */
+  updatesPerEpoch?: number;
 }
 
 export interface EpochMessage {
@@ -40,7 +42,18 @@ export interface EpochMessage {
   seconds: number;
 }
 
-export type WorkerMessage = EpochMessage | { type: 'done' } | { type: 'error'; message: string };
+/** Sent in the middle of an epoch so the lab can show the neurons being adjusted. */
+export interface ProgressMessage {
+  type: 'progress';
+  epoch: number;
+  /** how much of the epoch is done, 0..1 */
+  fraction: number;
+  loss: number;
+  trainAccuracy: number;
+  weights: NetworkWeights;
+}
+
+export type WorkerMessage = EpochMessage | ProgressMessage | { type: 'done' } | { type: 'error'; message: string };
 
 /** Pack samples into two flat typed arrays (fast to copy to the worker). */
 export function packSamples(samples: Array<{ label: number; pixels: Float32Array }>): PackedSamples {

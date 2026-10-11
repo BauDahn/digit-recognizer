@@ -13,10 +13,3 @@ export const EMNIST_BALANCED_CLASSES = [
   ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split(''),
   ...'abdefghnqrt'.split(''),
 ];
-
-/**
- * Symbols the math canvas understands. Digits come from MNIST, 'x' from EMNIST and
- * synthetic strokes, and the operators from synthetic strokes (see scripts/lib/syntheticSymbols.ts).
- * Dots (decimal point / multiplication dot) are detected geometrically, not by the network.
- */
-export const MATH_SYMBOL_CLASSES = [...DIGIT_CLASSES, '+', '-', '/', '=', '(', ')', 'x'];

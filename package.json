@@ -12,6 +12,7 @@
     "lint": "tsc --noEmit",
     "test": "vitest run",
     "build:datasets": "tsx scripts/build-datasets.ts",
+    "build:symbols": "tsx scripts/build-symbols.ts",
     "train:models": "tsx scripts/train-models.ts"
   },
   "dependencies": {

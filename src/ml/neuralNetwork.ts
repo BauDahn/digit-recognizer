@@ -97,7 +97,10 @@ export class NeuralNetwork {
   /**
    * Forward pass: computes all intermediate activations
    */
-  forward(x: Float32Array): {
+  forward(
+    x: Float32Array,
+    nonZero: Int32Array = nonZeroIndices(x)
+  ): {
     h1Raw: Float32Array;
     h1Act: Float32Array;
     h2Raw: Float32Array;
@@ -107,13 +110,16 @@ export class NeuralNetwork {
   } {
     const { inputSize, hiddenSize1, hiddenSize2, outputSize } = this.config;
 
-    // Layer 1
+    // Layer 1. Most pixels of a handwritten symbol are 0, so only the inked ones are multiplied:
+    // the result is identical and the dominant layer is ~4x cheaper.
     const h1Raw = new Float32Array(hiddenSize1);
     const h1Act = new Float32Array(hiddenSize1);
+    const nnz = nonZero.length;
     for (let i = 0; i < hiddenSize1; i++) {
       let sum = this.b1[i];
       const rowOffset = i * inputSize;
-      for (let j = 0; j < inputSize; j++) {
+      for (let k = 0; k < nnz; k++) {
+        const j = nonZero[k];
         sum += this.w1[rowOffset + j] * x[j];
       }
       h1Raw[i] = sum;
@@ -232,7 +238,8 @@ export class NeuralNetwork {
         const target = sample.label;
 
         // Forward
-        const { h1Raw, h1Act, h2Raw, h2Act, probabilities } = this.forward(x);
+        const nonZero = nonZeroIndices(x);
+        const { h1Raw, h1Act, h2Raw, h2Act, probabilities } = this.forward(x, nonZero);
 
         // Loss (Cross-Entropy: -log(p_target))
         const pTarget = Math.max(1e-15, probabilities[target]);
@@ -301,7 +308,8 @@ export class NeuralNetwork {
           const d = dH1[i];
           gb1[i] += d;
           const rowOffset = i * inputSize;
-          for (let j = 0; j < inputSize; j++) {
+          for (let k = 0; k < nonZero.length; k++) {
+            const j = nonZero[k];
             gw1[rowOffset + j] += d * x[j];
           }
         }
@@ -452,6 +460,16 @@ export class NeuralNetwork {
 }
 
 export const NETWORK_FORMAT_VERSION = 1;
+
+/** Indices of the pixels that are not 0. */
+export function nonZeroIndices(x: Float32Array): Int32Array {
+  let count = 0;
+  for (let j = 0; j < x.length; j++) if (x[j] !== 0) count++;
+  const out = new Int32Array(count);
+  let k = 0;
+  for (let j = 0; j < x.length; j++) if (x[j] !== 0) out[k++] = j;
+  return out;
+}
 
 export interface SerializedNetwork {
   format: number;
